@@ -36,11 +36,30 @@ Copy `terraform.tfvars.example` to `terraform.tfvars`, set the existing archive
 bucket name and region, the presentation AWS region/profile, and a globally
 unique Cognito domain prefix. Set `archive_prefix` to the same key prefix as
 the CLI configuration (or leave it empty for a root-level archive).
-The copied file and Terraform state are ignored by Git. Keep state private and
-back it up; it contains account and resource identifiers.
+The copied files are ignored by Git. Terraform state is stored in a separate
+private S3 bucket with versioning, default encryption, all public access blocked,
+and an HTTPS-only bucket policy. S3 versioning keeps recoverable prior state
+versions, and Terraform's S3 lockfile support prevents concurrent writers. The
+state contains account and resource identifiers; grant bucket access only to
+trusted administrators.
+
+Copy `backend.hcl.example` to `backend.hcl` and set `bucket` to the dedicated
+state bucket for this account. The S3 backend configuration stays local because
+bucket names vary by account. The initial setup migrates the existing local
+state; after that, repeat the same init command when setting up Terraform on a
+new machine:
 
 ```sh
-terraform init
+cp backend.hcl.example backend.hcl
+# Edit backend.hcl and set the bucket name.
+AWS_PROFILE=personal-admin terraform init -backend-config=backend.hcl -migrate-state
+```
+
+The backend bucket must exist before initialization. Do not delete it or its
+state objects. The presentation stack does not manage the backend bucket, so it
+cannot accidentally destroy the state it uses.
+
+```sh
 terraform fmt -check -recursive
 terraform validate
 terraform plan

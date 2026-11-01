@@ -14,6 +14,7 @@ diagnostics/
 *.tfstate.*
 *.tfvars
 !*.tfvars.example
+backend.hcl
 web/public/config.json
 web/node_modules/
 web/dist/
