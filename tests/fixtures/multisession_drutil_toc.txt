@@ -1,0 +1,34 @@
+ Vendor   Product           Rev 
+ Apple    SuperDrive        2.00
+
+    First session:             1
+    Last session:              3
+    First track:               1
+    Disc type:                 32 (CD-ROM XA disc with first track in Mode 2)
+    Last track:                1
+    Lead-out:                  02:18.54
+    Session  1, Track  1:      00:02.00  data track, digital copy prohibited
+    Next possible track start: 04:48.54
+    Number of ptrs in Mode 5:  3
+    Last possible lead-out:    79:59.72
+    Optimum recording power:   102
+    Application code:          0
+    Start of first lead-in:    97:25.30
+    Unrecognized descriptor: 01 54 00 ffffffc1 48 34 ffffff90 00 00 00 00
+    First track:               2
+    Disc type:                 32 (CD-ROM XA disc with first track in Mode 2)
+    Last track:                2
+    Lead-out:                  07:10.04
+    Session  2, Track  2:      04:50.54  data track, digital copy prohibited
+    Next possible track start: 08:40.04
+    Number of ptrs in Mode 5:  1
+    Last possible lead-out:    79:59.72
+    First track:               3
+    Disc type:                 32 (CD-ROM XA disc with first track in Mode 2)
+    Last track:                3
+    Lead-out:                  12:53.74
+    Session  3, Track  3:      08:42.04  data track, digital copy prohibited
+    Next possible track start: 14:23.74
+    Number of ptrs in Mode 5:  1
+    Last possible lead-out:    79:59.72
+

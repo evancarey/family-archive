@@ -1,0 +1,7 @@
+{
+  "apiUrl": "https://YOUR_API_ID.execute-api.YOUR_REGION.amazonaws.com",
+  "cognitoDomain": "https://YOUR_DOMAIN.auth.YOUR_REGION.amazoncognito.com",
+  "clientId": "YOUR_COGNITO_APP_CLIENT_ID",
+  "redirectUri": "https://YOUR_CLOUDFRONT_DOMAIN/",
+  "scopes": ["openid", "email", "profile"]
+}

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>DeviceIdentifier</key><string>disk5</string>
+    <key>DeviceNode</key><string>/dev/disk5</string>
+    <key>FilesystemType</key><string>udf</string>
+    <key>MountPoint</key><string>/Volumes/070307_2229</string>
+    <key>OpticalDeviceType</key>
+    <string>CD-ROM, CD-R, CD-RW, DVD-ROM, DVD-R, DVD-R DL, DVD-RW, DVD+R, DVD+R DL, DVD+RW</string>
+    <key>OpticalMediaType</key><string>DVD+R</string>
+    <key>ParentWholeDisk</key><string>disk5</string>
+    <key>Size</key><integer>3714285568</integer>
+    <key>IOKitSize</key><integer>3714285568</integer>
+    <key>DeviceBlockSize</key><integer>2048</integer>
+    <key>TotalSize</key><integer>3713744896</integer>
+    <key>VolumeName</key><string>070307_2229</string>
+    <key>WholeDisk</key><true/>
+    <key>Writable</key><false/>
+    <key>WritableMedia</key><false/>
+    <key>WritableVolume</key><false/>
+</dict>
+</plist>

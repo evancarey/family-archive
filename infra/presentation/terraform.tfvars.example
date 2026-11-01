@@ -1,0 +1,6 @@
+aws_region             = "us-east-1"
+archive_bucket_region  = "eu-west-3"
+aws_profile            = "personal-admin"
+archive_bucket_name    = "your-existing-private-archive-bucket"
+archive_prefix         = ""
+cognito_domain_prefix  = "choose-a-globally-unique-family-archive-name"
