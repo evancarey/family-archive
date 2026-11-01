@@ -11,9 +11,14 @@ const defaults = () => ({
   layout: "grid",
 });
 
-export const readBrowseState = (storage = globalThis.sessionStorage) => {
+export const readBrowseState = (storage = globalThis.localStorage) => {
   try {
-    const saved = JSON.parse(storage.getItem(STORAGE_KEY) || "null");
+    let serialized = storage.getItem(STORAGE_KEY);
+    if (serialized === null && storage === globalThis.localStorage) {
+      serialized = globalThis.sessionStorage?.getItem(STORAGE_KEY) ?? null;
+      if (serialized !== null) storage.setItem(STORAGE_KEY, serialized);
+    }
+    const saved = JSON.parse(serialized || "null");
     if (!saved || typeof saved !== "object" || Array.isArray(saved)) return defaults();
     const pageSize = PAGE_SIZE_OPTIONS.includes(saved.pageSize) ? saved.pageSize : 30;
     const requestedOffset = Number.isSafeInteger(saved.offset) && saved.offset >= 0
@@ -31,7 +36,7 @@ export const readBrowseState = (storage = globalThis.sessionStorage) => {
   }
 };
 
-export const writeBrowseState = (state, storage = globalThis.sessionStorage) => {
+export const writeBrowseState = (state, storage = globalThis.localStorage) => {
   try {
     const value = {
       offset: Number.isSafeInteger(state.offset) && state.offset >= 0 ? state.offset : 0,

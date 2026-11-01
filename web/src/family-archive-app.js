@@ -4,7 +4,7 @@ import { hasPresentationConfig } from "./config.js";
 import { checkLibraryApi, fetchPhotos, SignInRequiredError } from "./library-api.js";
 import { PAGE_SIZE_OPTIONS, readBrowseState, writeBrowseState } from "./browse-state.js";
 import { pageTokens, placeholderCount } from "./pagination.js";
-import { requiresPreviewForViewer, viewerImageSource } from "./image-display.js";
+import { fitImageDimensions, requiresPreviewForViewer, viewerImageSource } from "./image-display.js";
 import { rotateAngle } from "./rotation.js";
 import { mockLibraryEnabled, readMockLibraryPage } from "./mock-library.js";
 
@@ -121,6 +121,8 @@ class FamilyArchiveApp extends LitElement {
       if (!ready) throw new Error("The library service is not ready yet.");
       this.statusMessage = "Your secure connection is ready.";
       this.statusState = "ready";
+      await this.updateComplete;
+      this.syncRestoredPageSize();
       await this.loadPhotos({ offset: this.offset });
     } catch (error) {
       if (error instanceof SignInRequiredError) {
@@ -137,6 +139,14 @@ class FamilyArchiveApp extends LitElement {
       this.statusMessage = error.message;
       this.statusState = "error";
     }
+  }
+
+  syncRestoredPageSize() {
+    const selected = Number(this.querySelector(".page-size-filter select")?.value);
+    if (!PAGE_SIZE_OPTIONS.includes(selected) || selected === this.pageSize) return;
+    this.pageSize = selected;
+    this.offset = Math.floor(this.offset / selected) * selected;
+    this.saveBrowseState();
   }
 
   async signIn() {
@@ -375,6 +385,35 @@ class FamilyArchiveApp extends LitElement {
     return this.items.find((item) => rotationKey(item) === this.selectedPhotoKey) || null;
   }
 
+  layoutViewerImage(image, rotation = Number(image.dataset.rotation)) {
+    const stage = image.closest(".viewer-image-stage");
+    const body = stage?.parentElement;
+    if (stage && body) {
+      const columns = window.getComputedStyle(body).gridTemplateColumns.split(/\s+/);
+      const maxWidth = Number.parseFloat(columns[1]) || stage.clientWidth;
+      const { width, height } = fitImageDimensions(
+        image.naturalWidth,
+        image.naturalHeight,
+        maxWidth,
+        body.clientHeight,
+        Number(image.dataset.rotation),
+      );
+      if (width > 0 && height > 0) {
+        stage.style.width = `${width}px`;
+        stage.style.height = `${height}px`;
+        stage.style.aspectRatio = `${width} / ${height}`;
+        const sideways = Math.abs(rotation) % 180 === 90;
+        image.style.width = `${sideways ? height : width}px`;
+        image.style.height = `${sideways ? width : height}px`;
+      }
+    }
+  }
+
+  handleViewerImageLoad(event) {
+    this.layoutViewerImage(event.currentTarget);
+    this.viewerImageVisible = true;
+  }
+
   renderImageViewer(item, itemIndex) {
     if (!item) {
       return html`<section class="image-viewer" aria-label="Photograph viewer">
@@ -456,7 +495,7 @@ class FamilyArchiveApp extends LitElement {
                   alt=${item.filename}
                   data-rotation=${rotation}
                   ?data-visible=${this.viewerImageVisible}
-                  @load=${() => { this.viewerImageVisible = true; }}
+                  @load=${(event) => this.handleViewerImageLoad(event)}
                   @error=${() => { this.viewerImageVisible = true; }}
                 />`
               : html`<p class="viewer-image-unavailable">No browser preview is available.</p>`}
@@ -478,7 +517,7 @@ class FamilyArchiveApp extends LitElement {
     `;
   }
 
-  rotatePhoto(item, degrees) {
+  async rotatePhoto(item, degrees) {
     const key = rotationKey(item);
     const current = this.rotations[key] || 0;
     this.rotations = {
@@ -490,6 +529,13 @@ class FamilyArchiveApp extends LitElement {
       this.libraryMessage = "Thumbnail rotation saved in this browser.";
     } catch {
       this.libraryMessage = "Rotation applied for this visit, but browser storage is unavailable.";
+    }
+    if (this.viewerOpen && key === this.selectedPhotoKey) {
+      await this.updateComplete;
+      const image = this.querySelector(".viewer-image");
+      if (image?.complete && image.naturalWidth > 0) {
+        this.layoutViewerImage(image, this.rotations[key]);
+      }
     }
   }
 

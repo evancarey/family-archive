@@ -72,3 +72,36 @@ test("refreshes the access token before API requests and reports renewal failure
     Date.now = originalNow;
   }
 });
+
+test("renders no more photos than the selected page size if the API over-returns", async () => {
+  values.set(
+    "family-archive.oauth-session",
+    JSON.stringify({
+      accessToken: "page-token",
+      refreshToken: null,
+      expiresAt: Date.now() + 3_600_000,
+    }),
+  );
+  const auth = await import("../src/auth.js");
+  const { fetchPhotos } = await import("../src/library-api.js");
+  assert.equal(await auth.finishSignIn(), true);
+
+  globalThis.fetch = async (url, options) => {
+    if (url === "/config.json") return { ok: true, json: async () => config };
+    assert.equal(new URL(url).searchParams.get("limit"), "10");
+    assert.equal(options.headers.authorization, "Bearer page-token");
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        total: 30,
+        items: Array.from({ length: 30 }, (_, index) => ({ filename: `photo-${index}.jpg` })),
+      }),
+    };
+  };
+
+  const result = await fetchPhotos({ query: "", sourceId: "", offset: 0, limit: 10 });
+
+  assert.equal(result.payload.total, 30);
+  assert.equal(result.payload.items.length, 10);
+});

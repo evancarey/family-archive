@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { requiresPreviewForViewer, viewerImageSource } from "../src/image-display.js";
+import {
+  fitImageDimensions,
+  requiresPreviewForViewer,
+  viewerImageSource,
+} from "../src/image-display.js";
 
 test("TIFF viewer uses the browser-compatible JPEG preview", () => {
   const item = {
@@ -26,4 +30,18 @@ test("browser-supported formats continue to use the preserved original", () => {
 
   assert.equal(requiresPreviewForViewer(item), false);
   assert.equal(viewerImageSource(item), item.original_url);
+});
+
+test("portrait originals keep their aspect ratio within the viewer bounds", () => {
+  assert.deepEqual(fitImageDimensions(1536, 2048, 1200, 900), {
+    width: 675,
+    height: 900,
+  });
+});
+
+test("quarter-turn rotation fits using the rotated aspect ratio", () => {
+  assert.deepEqual(fitImageDimensions(1536, 2048, 1200, 900, 90), {
+    width: 1200,
+    height: 900,
+  });
 });

@@ -47,5 +47,9 @@ export const fetchPhotos = async ({ query, sourceId, offset, limit = 30 }) => {
   if (!response.ok && response.status !== 404) {
     throw new Error(payload.error || "The photographs could not be loaded.");
   }
-  return { status: response.status, payload };
+  const page = {
+    ...payload,
+    items: Array.isArray(payload.items) ? payload.items.slice(0, limit) : [],
+  };
+  return { status: response.status, payload: page };
 };

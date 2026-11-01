@@ -152,14 +152,14 @@ h1 { max-width: 680px; font-size: clamp(48px, 8vw, 86px); letter-spacing: -.045e
 .viewer-edit-toggle { position: static; flex: 0 0 auto; }
 .viewer-rotation-controls { position: absolute; top: calc(100% + 6px); right: 0; bottom: auto; z-index: 2; }
 .viewer-body { display: grid; grid-template-columns: 52px minmax(0, 1fr) 52px; align-items: center; justify-items: center; gap: 14px; min-height: 0; }
-.viewer-image-stage { display: grid; place-items: center; width: min(100%, 1200px, calc((100vh - 180px) * 4 / 3)); aspect-ratio: 4 / 3; margin: 0; overflow: hidden; border-radius: 12px; background: #e3e4da; }
-.viewer-image { display: block; max-width: 100%; max-height: 100%; object-fit: contain; opacity: 0; transition: opacity 200ms ease, transform 180ms ease; }
+.viewer-image-stage { position: relative; display: grid; place-items: center; width: min(100%, 1200px, calc((100vh - 180px) * 4 / 3)); aspect-ratio: 4 / 3; margin: 0; overflow: hidden; border-radius: 12px; background: #e3e4da; }
+.viewer-image { position: absolute; top: 50%; left: 50%; display: block; width: 100%; height: 100%; max-width: 100%; max-height: 100%; object-fit: contain; object-position: center; opacity: 0; transform: translate(-50%, -50%); transition: opacity 200ms ease, transform 180ms ease; }
 .viewer-image[data-visible] { opacity: 1; }
 .viewer-image-unavailable { color: var(--muted); font-size: 14px; }
 .viewer-message a { color: var(--green); font-weight: 600; }
-.viewer-image[data-rotation="90"] { width: 75%; height: 75%; transform: rotate(90deg); }
-.viewer-image[data-rotation="180"] { transform: rotate(180deg); }
-.viewer-image[data-rotation="270"] { width: 75%; height: 75%; transform: rotate(270deg); }
+.viewer-image[data-rotation="90"] { max-width: none; max-height: none; transform: translate(-50%, -50%) rotate(90deg); }
+.viewer-image[data-rotation="180"] { transform: translate(-50%, -50%) rotate(180deg); }
+.viewer-image[data-rotation="270"] { max-width: none; max-height: none; transform: translate(-50%, -50%) rotate(270deg); }
 .viewer-nav { display: grid; width: 48px; height: 62px; place-items: center; padding: 0; border: 1px solid var(--line); border-radius: 14px; background: var(--card); color: var(--ink); cursor: pointer; font-size: 42px; line-height: 1; }
 .viewer-nav:hover:not(:disabled) { background: #e5e9df; }
 .viewer-nav:focus-visible { outline: 3px solid #92b89e; outline-offset: 3px; }
