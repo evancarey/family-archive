@@ -2,11 +2,12 @@ import base64
 import hashlib
 import io
 from copy import deepcopy
+from datetime import UTC, datetime, timedelta
 
 import boto3
 import pytest
 from botocore.exceptions import ClientError
-from botocore.stub import Stubber
+from botocore.stub import ANY, Stubber
 
 from family_archive.storage import StorageError
 from family_archive.storage.s3 import S3Storage
@@ -26,8 +27,12 @@ class S3Client:
         self.fail_part = None
         self.corrupt = False
         self.if_none_match = []
+        self.get_calls = 0
+        self.head_calls = 0
+        self.omit_checksum = False
 
     def get_object(self, Bucket, Key):
+        self.get_calls += 1
         if Key not in self.objects:
             raise error("NoSuchKey")
         data = self.objects[Key]
@@ -37,17 +42,23 @@ class S3Client:
         self.if_none_match.append(IfNoneMatch)
         if Key in self.objects:
             raise error("PreconditionFailed")
-        self.objects[Key] = Body.read() if hasattr(Body, "read") else Body
-        return {}
+        data = Body.read() if hasattr(Body, "read") else Body
+        self.objects[Key] = data
+        if self.omit_checksum:
+            return {}
+        return {"ChecksumSHA256": base64.b64encode(hashlib.sha256(data).digest()).decode()}
 
     def head_object(self, Bucket, Key, ChecksumMode):
+        self.head_calls += 1
         if Key not in self.objects:
             raise error("NoSuchKey")
         data = self.objects[Key]
-        return {
+        result = {
             "ContentLength": len(data),
-            "ChecksumSHA256": base64.b64encode(hashlib.sha256(data).digest()).decode(),
         }
+        if not self.omit_checksum:
+            result["ChecksumSHA256"] = base64.b64encode(hashlib.sha256(data).digest()).decode()
+        return result
 
     def create_multipart_upload(self, Bucket, Key, **kwargs):
         identifier = str(len(self.uploads) + 1)
@@ -86,7 +97,7 @@ def test_conditional_bytes_and_conflict():
     assert client.objects["manifest"] == b"original"
 
 
-def test_small_file_conditional_upload_and_readback(tmp_path):
+def test_small_file_conditional_upload_verifies_s3_checksum_without_readback(tmp_path):
     path = tmp_path / "photo.jpg"
     path.write_bytes(b"original photo bytes")
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -95,10 +106,26 @@ def test_small_file_conditional_upload_and_readback(tmp_path):
     storage.ensure_small_file("sources/SRC-0001/data/photo.jpg", path, digest)
     storage.ensure_small_file("sources/SRC-0001/data/photo.jpg", path, digest)
     assert client.objects["sources/SRC-0001/data/photo.jpg"] == path.read_bytes()
-    assert client.if_none_match == ["*"]
+    assert client.if_none_match == ["*", "*"]
+    assert client.get_calls == 0
+    assert client.head_calls == 1  # only the conflict path needs a HEAD
     path.write_bytes(b"different photo bytes")
     with pytest.raises(StorageError, match="not overwritten"):
         storage.ensure_small_file("sources/SRC-0001/data/photo.jpg", path, digest)
+
+
+def test_small_file_falls_back_to_full_readback_when_s3_checksum_is_unavailable(tmp_path):
+    path = tmp_path / "photo.jpg"
+    path.write_bytes(b"photo bytes")
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    client = S3Client()
+    client.omit_checksum = True
+    storage = S3Storage("archive-test", client)
+
+    storage.ensure_small_file("photo", path, digest)
+
+    assert client.objects["photo"] == path.read_bytes()
+    assert client.get_calls == 1
 
 
 def test_content_addressed_file_uses_s3_checksum_for_existing_and_new_objects(tmp_path):
@@ -117,6 +144,56 @@ def test_content_addressed_file_uses_s3_checksum_for_existing_and_new_objects(tm
     with pytest.raises(StorageError, match="Existing object differs"):
         storage.ensure_content_addressed_file("library/media/photo", path, digest)
     assert client.objects["library/media/photo"] == b"original photo bytes"
+
+
+def test_small_file_sdk_put_sends_and_checks_sha256_without_a_readback(tmp_path):
+    client = boto3.client(
+        "s3", region_name="us-east-1", aws_access_key_id="testing", aws_secret_access_key="testing"
+    )
+    data = b"photo"
+    digest = hashlib.sha256(data).hexdigest()
+    checksum = base64.b64encode(bytes.fromhex(digest)).decode()
+    path = tmp_path / "photo.jpg"
+    path.write_bytes(data)
+    storage = S3Storage("archive-test", client)
+
+    with Stubber(client) as stub:
+        stub.add_response(
+            "put_object",
+            {"ETag": '"etag"', "ChecksumSHA256": checksum},
+            {
+                "Bucket": "archive-test",
+                "Key": "photo.jpg",
+                "Body": ANY,
+                "IfNoneMatch": "*",
+                "ChecksumSHA256": checksum,
+            },
+        )
+        storage.ensure_small_file("photo.jpg", path, digest)
+        stub.assert_no_pending_responses()
+
+
+def test_latest_key_returns_most_recent_object_across_pages():
+    first = datetime(2026, 10, 1, tzinfo=UTC)
+    second = first + timedelta(days=1)
+
+    class Paginator:
+        def paginate(self, **_parameters):
+            return iter(
+                [
+                    {"Contents": [{"Key": "library/index/old.json", "LastModified": first}]},
+                    {"Contents": [{"Key": "library/index/new.json", "LastModified": second}]},
+                ]
+            )
+
+    class Client:
+        def get_paginator(self, operation):
+            assert operation == "list_objects_v2"
+            return Paginator()
+
+    storage = S3Storage("archive-test", Client())
+
+    assert storage.latest_key("library/index/") == "library/index/new.json"
 
 
 def test_multipart_resume(tmp_path, monkeypatch):

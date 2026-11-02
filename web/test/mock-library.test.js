@@ -32,3 +32,28 @@ test("mock library filters by search text and source, then paginates", () => {
   const nextPage = readMockLibraryPage({ offset: 10, limit: 10 });
   assert.equal(nextPage.items[0].filename, "memory-11.svg");
 });
+
+test("mock library includes items from any selected disc", () => {
+  const page = readMockLibraryPage({
+    sourceIds: ["SRC-MOCK-01", "SRC-MOCK-03"],
+    offset: 0,
+    limit: 100,
+  });
+
+  assert.equal(page.total, 24);
+  assert.ok(page.items.every((item) => ["SRC-MOCK-01", "SRC-MOCK-03"].includes(item.source_id)));
+});
+
+test("mock library reports no videos rather than showing photo records in the video view", () => {
+  const page = readMockLibraryPage({ mediaType: "video", offset: 0, limit: 10 });
+  assert.equal(page.total, 0);
+  assert.deepEqual(page.items, []);
+});
+
+test("mock library sorts by file modification date before paginating", () => {
+  const newest = readMockLibraryPage({ sort: "newest", offset: 0, limit: 1 });
+  const oldest = readMockLibraryPage({ sort: "oldest", offset: 0, limit: 1 });
+
+  assert.equal(newest.items[0].filename, "memory-24.svg");
+  assert.equal(oldest.items[0].filename, "memory-25.svg");
+});

@@ -142,6 +142,7 @@ resource "aws_cloudfront_response_headers_policy" "security" {
         "style-src 'self';",
         "connect-src 'self' https://*.execute-api.${var.aws_region}.amazonaws.com https://*.auth.${var.aws_region}.amazoncognito.com;",
         "img-src 'self' data: https://${var.archive_bucket_name}.s3.${var.archive_bucket_region}.amazonaws.com;",
+        "media-src https://${var.archive_bucket_name}.s3.${var.archive_bucket_region}.amazonaws.com;",
         "object-src 'none';",
         "base-uri 'none';",
         "frame-ancestors 'none';",
@@ -223,6 +224,22 @@ resource "aws_iam_role_policy_attachment" "api_logs" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
+resource "aws_dynamodb_table" "library_tags" {
+  name                        = "${var.project_name}-library-tags"
+  billing_mode                = "PAY_PER_REQUEST"
+  hash_key                    = "sha256"
+  deletion_protection_enabled = true
+
+  attribute {
+    name = "sha256"
+    type = "S"
+  }
+
+  point_in_time_recovery {
+    enabled = true
+  }
+}
+
 resource "aws_iam_role_policy" "api_library_read" {
   name = "read-derived-library-only"
   role = aws_iam_role.api.id
@@ -248,6 +265,12 @@ resource "aws_iam_role_policy" "api_library_read" {
         Effect   = "Allow"
         Action   = "s3:GetObject"
         Resource = "${data.aws_s3_bucket.archive.arn}/${local.library_key_prefix}*"
+      },
+      {
+        Sid      = "ManageSharedLibraryTags"
+        Effect   = "Allow"
+        Action   = ["dynamodb:GetItem", "dynamodb:Scan", "dynamodb:PutItem"]
+        Resource = aws_dynamodb_table.library_tags.arn
       }
     ]
   })
@@ -271,9 +294,10 @@ resource "aws_lambda_function" "api" {
 
   environment {
     variables = {
-      LIBRARY_BUCKET = data.aws_s3_bucket.archive.bucket
-      ARCHIVE_REGION = var.archive_bucket_region
-      LIBRARY_PREFIX = local.library_key_prefix
+      LIBRARY_BUCKET    = data.aws_s3_bucket.archive.bucket
+      ARCHIVE_REGION    = var.archive_bucket_region
+      LIBRARY_PREFIX    = local.library_key_prefix
+      ANNOTATIONS_TABLE = aws_dynamodb_table.library_tags.name
     }
   }
 }
@@ -285,7 +309,7 @@ resource "aws_apigatewayv2_api" "library" {
 
   cors_configuration {
     allow_origins = [local.site_origin]
-    allow_methods = ["GET", "OPTIONS"]
+    allow_methods = ["GET", "PUT", "OPTIONS"]
     allow_headers = ["authorization", "content-type"]
     max_age       = 300
   }
@@ -329,6 +353,14 @@ resource "aws_apigatewayv2_route" "library" {
   authorizer_id      = aws_apigatewayv2_authorizer.family.id
 }
 
+resource "aws_apigatewayv2_route" "tags" {
+  api_id             = aws_apigatewayv2_api.library.id
+  route_key          = "PUT /api/tags"
+  target             = "integrations/${aws_apigatewayv2_integration.api.id}"
+  authorization_type = "JWT"
+  authorizer_id      = aws_apigatewayv2_authorizer.family.id
+}
+
 resource "aws_apigatewayv2_stage" "default" {
   api_id      = aws_apigatewayv2_api.library.id
   name        = "$default"
@@ -349,4 +381,12 @@ resource "aws_lambda_permission" "api_gateway_library" {
   function_name = aws_lambda_function.api.function_name
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_apigatewayv2_api.library.execution_arn}/*/GET/api/library"
+}
+
+resource "aws_lambda_permission" "api_gateway_tags" {
+  statement_id  = "AllowAuthenticatedHttpApiTagUpdates"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.api.function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_apigatewayv2_api.library.execution_arn}/*/PUT/api/tags"
 }

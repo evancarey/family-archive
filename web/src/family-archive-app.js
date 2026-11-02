@@ -1,11 +1,21 @@
 import { LitElement, html } from "lit";
 import { beginSignIn, currentAccessToken, endSignIn, finishSignIn } from "./auth.js";
 import { hasPresentationConfig } from "./config.js";
-import { checkLibraryApi, fetchPhotos, SignInRequiredError } from "./library-api.js";
+import {
+  checkLibraryApi,
+  fetchLibraryMedia,
+  SignInRequiredError,
+  updateFileTags,
+} from "./library-api.js";
 import { PAGE_SIZE_OPTIONS, readBrowseState, writeBrowseState } from "./browse-state.js";
 import { pageTokens, placeholderCount } from "./pagination.js";
 import { fitImageDimensions, requiresPreviewForViewer, viewerImageSource } from "./image-display.js";
-import { rotateAngle } from "./rotation.js";
+import {
+  archiveEntryKey,
+  imageRotationFor,
+  imageRotationKey,
+  rotateAngle,
+} from "./rotation.js";
 import { mockLibraryEnabled, readMockLibraryPage } from "./mock-library.js";
 
 const ROTATION_STORAGE_KEY = "family-archive:thumbnail-rotations:v1";
@@ -23,7 +33,11 @@ const loadRotations = () => {
   }
 };
 
-const rotationKey = (item) => `${item.source_id}:${item.path}:${item.sha256}`;
+const entryKey = archiveEntryKey;
+const rotationKey = imageRotationKey;
+const rotationFor = imageRotationFor;
+const mediaNoun = (mediaType) => (mediaType === "video" ? "video" : "photograph");
+const mediaPlural = (mediaType) => (mediaType === "video" ? "videos" : "photographs");
 
 class FamilyArchiveApp extends LitElement {
   static properties = {
@@ -37,11 +51,13 @@ class FamilyArchiveApp extends LitElement {
     total: { state: true },
     offset: { state: true },
     pageSize: { state: true },
+    mediaType: { state: true },
     query: { state: true },
-    sourceId: { state: true },
+    sourceIds: { state: true },
     libraryMessage: { state: true },
     loading: { state: true },
     layout: { state: true },
+    sort: { state: true },
     rotations: { state: true },
     editingRotationKey: { state: true },
     viewerOpen: { state: true },
@@ -50,6 +66,9 @@ class FamilyArchiveApp extends LitElement {
     viewerImageVisible: { state: true },
     viewerTransitioning: { state: true },
     viewerMessage: { state: true },
+    videoPlaybackErrorKey: { state: true },
+    tagDrafts: { state: true },
+    savingTagHashes: { state: true },
   };
 
   constructor() {
@@ -65,11 +84,13 @@ class FamilyArchiveApp extends LitElement {
     this.total = 0;
     this.offset = browseState.offset;
     this.pageSize = browseState.pageSize;
+    this.mediaType = browseState.mediaType;
     this.query = browseState.query;
-    this.sourceId = browseState.sourceId;
+    this.sourceIds = browseState.sourceIds;
     this.libraryMessage = "";
     this.loading = false;
     this.layout = browseState.layout;
+    this.sort = browseState.sort;
     this.rotations = loadRotations();
     this.editingRotationKey = "";
     this.viewerOpen = false;
@@ -78,9 +99,37 @@ class FamilyArchiveApp extends LitElement {
     this.viewerImageVisible = false;
     this.viewerTransitioning = false;
     this.viewerMessage = "";
+    this.videoPlaybackErrorKey = "";
+    this.tagDrafts = {};
+    this.savingTagHashes = [];
     this.requestId = 0;
     this.searchTimer = null;
     this.mockMode = mockLibraryEnabled();
+    this.handleDocumentClick = (event) => {
+      const filter = this.querySelector(".source-filter");
+      if (filter?.open && !filter.contains(event.target)) filter.open = false;
+
+      const editPanel = this.querySelector(".image-viewer .viewer-edit-panel");
+      const editButton = this.querySelector(".image-viewer .viewer-edit-toggle");
+      if (
+        this.viewerOpen
+        && this.editingRotationKey
+        && !editPanel?.contains(event.target)
+        && !editButton?.contains(event.target)
+      ) {
+        this.editingRotationKey = "";
+      }
+    };
+  }
+
+  connectedCallback() {
+    super.connectedCallback();
+    document.addEventListener("click", this.handleDocumentClick);
+  }
+
+  disconnectedCallback() {
+    document.removeEventListener("click", this.handleDocumentClick);
+    super.disconnectedCallback();
   }
 
   createRenderRoot() {
@@ -145,7 +194,6 @@ class FamilyArchiveApp extends LitElement {
     const selected = Number(this.querySelector(".page-size-filter select")?.value);
     if (!PAGE_SIZE_OPTIONS.includes(selected) || selected === this.pageSize) return;
     this.pageSize = selected;
-    this.offset = Math.floor(this.offset / selected) * selected;
     this.saveBrowseState();
   }
 
@@ -181,7 +229,9 @@ class FamilyArchiveApp extends LitElement {
     if (this.mockMode) {
       const page = readMockLibraryPage({
         query: this.query,
-        sourceId: this.sourceId,
+        sourceIds: this.sourceIds,
+        mediaType: this.mediaType,
+        sort: this.sort,
         offset,
         limit: this.pageSize,
       });
@@ -194,11 +244,13 @@ class FamilyArchiveApp extends LitElement {
       this.total = page.total;
       this.offset = page.total === 0 ? 0 : offset;
       this.loading = false;
-      this.libraryMessage = "Local mock data — downloads use sample SVGs, not archive originals.";
+      this.libraryMessage = this.mediaType === "video"
+        ? "The local preview contains sample photos only."
+        : "Local mock data — downloads use sample SVGs, not archive originals.";
       this.saveBrowseState();
       if (viewerTarget && page.items.length) {
         const targetItem = viewerTarget === "first" ? page.items[0] : page.items.at(-1);
-        this.selectedPhotoKey = rotationKey(targetItem);
+        this.selectedPhotoKey = entryKey(targetItem);
         this.viewerLoading = false;
         this.viewerTransitioning = false;
         this.viewerImageVisible = true;
@@ -208,14 +260,16 @@ class FamilyArchiveApp extends LitElement {
     }
     const requestId = ++this.requestId;
     this.loading = true;
-    this.libraryMessage = "Loading photographs…";
+    this.libraryMessage = `Loading ${mediaPlural(this.mediaType)}…`;
 
     try {
-      const { status, payload } = await fetchPhotos({
+      const { status, payload } = await fetchLibraryMedia({
         query: this.query.trim(),
-        sourceId: this.sourceId,
+        sourceIds: this.sourceIds,
         offset,
         limit: this.pageSize,
+        mediaType: this.mediaType,
+        sort: this.sort,
       });
       if (requestId !== this.requestId) return;
       if (status === 404) {
@@ -252,15 +306,16 @@ class FamilyArchiveApp extends LitElement {
       this.saveBrowseState();
       if (viewerTarget) {
         const targetItem = viewerTarget === "first" ? payload.items[0] : payload.items.at(-1);
-        this.selectedPhotoKey = rotationKey(targetItem);
+        this.selectedPhotoKey = entryKey(targetItem);
         this.viewerLoading = false;
         this.viewerTransitioning = false;
         this.viewerImageVisible = !viewerImageSource(targetItem);
         this.viewerMessage = "";
+        this.videoPlaybackErrorKey = "";
       }
       this.libraryMessage = payload.items.length
-        ? "Select a photograph to open its preserved original."
-        : "No photographs match this search.";
+        ? `Select a ${mediaNoun(this.mediaType)} to open it.`
+        : `No ${mediaPlural(this.mediaType)} match this search.`;
     } catch (error) {
       if (requestId !== this.requestId) return;
       this.loading = false;
@@ -290,13 +345,39 @@ class FamilyArchiveApp extends LitElement {
   }
 
   handleSource(event) {
-    this.sourceId = event.currentTarget.value;
-    this.loadPhotos();
+    const { value, checked } = event.currentTarget;
+    const selected = new Set(this.sourceIds);
+    if (checked) selected.add(value);
+    else selected.delete(value);
+    this.sourceIds = [...selected];
+    this.items = [];
+    this.offset = 0;
+    this.saveBrowseState(0);
+    this.loadPhotos({ offset: 0 });
+  }
+
+  clearSources() {
+    this.sourceIds = [];
+    this.items = [];
+    this.offset = 0;
+    this.saveBrowseState(0);
+    this.loadPhotos({ offset: 0 });
+  }
+
+  selectMediaType(mediaType) {
+    if (!["photo", "video"].includes(mediaType) || mediaType === this.mediaType) return;
+    this.mediaType = mediaType;
+    this.offset = 0;
+    this.items = [];
+    this.videoPlaybackErrorKey = "";
+    this.libraryMessage = `Loading ${mediaPlural(mediaType)}…`;
+    this.saveBrowseState(0);
+    this.loadPhotos({ offset: 0 });
   }
 
   handlePageSize(event) {
     this.pageSize = Number(event.currentTarget.value);
-    this.loadPhotos();
+    this.loadPhotos({ offset: this.offset });
   }
 
   setLayout(layout) {
@@ -304,22 +385,34 @@ class FamilyArchiveApp extends LitElement {
     this.saveBrowseState();
   }
 
+  handleSort(event) {
+    this.sort = event.currentTarget.value;
+    this.items = [];
+    this.offset = 0;
+    this.saveBrowseState(0);
+    this.loadPhotos({ offset: 0 });
+  }
+
   saveBrowseState(offset = this.offset) {
     writeBrowseState({
       offset,
       pageSize: this.pageSize,
       query: this.query,
-      sourceId: this.sourceId,
+      sourceIds: this.sourceIds,
+      mediaType: this.mediaType,
       layout: this.layout,
+      sort: this.sort,
     });
   }
 
   openPhoto(item) {
-    this.selectedPhotoKey = rotationKey(item);
+    this.selectedPhotoKey = entryKey(item);
+    this.editingRotationKey = "";
     this.viewerOpen = true;
     this.viewerImageVisible = false;
     this.viewerTransitioning = false;
     this.viewerMessage = "";
+    this.videoPlaybackErrorKey = "";
     this.updateComplete.then(() => this.querySelector(".image-viewer")?.focus());
   }
 
@@ -329,13 +422,14 @@ class FamilyArchiveApp extends LitElement {
     this.viewerImageVisible = false;
     this.viewerTransitioning = false;
     this.viewerMessage = "";
+    this.videoPlaybackErrorKey = "";
     this.updateComplete.then(() => this.querySelector("#library-title")?.focus());
   }
 
   async moveViewer(direction) {
     if (this.viewerLoading || this.viewerTransitioning) return;
     const currentIndex = this.items.findIndex(
-      (item) => rotationKey(item) === this.selectedPhotoKey,
+      (item) => entryKey(item) === this.selectedPhotoKey,
     );
     if (currentIndex < 0) return;
 
@@ -345,10 +439,12 @@ class FamilyArchiveApp extends LitElement {
       this.viewerImageVisible = false;
       await this.updateComplete;
       await new Promise((resolve) => window.setTimeout(resolve, VIEWER_FADE_DURATION_MS));
-      this.selectedPhotoKey = rotationKey(this.items[nextIndex]);
+      this.selectedPhotoKey = entryKey(this.items[nextIndex]);
+      this.editingRotationKey = "";
       this.viewerTransitioning = false;
       if (!viewerImageSource(this.items[nextIndex])) this.viewerImageVisible = true;
       this.viewerMessage = "";
+      this.videoPlaybackErrorKey = "";
       return;
     }
 
@@ -359,7 +455,9 @@ class FamilyArchiveApp extends LitElement {
     this.viewerLoading = true;
     this.viewerTransitioning = true;
     this.viewerImageVisible = false;
-    this.viewerMessage = direction > 0 ? "Loading next photograph…" : "Loading previous photograph…";
+    this.viewerMessage = direction > 0
+      ? `Loading next ${mediaNoun(this.mediaType)}…`
+      : `Loading previous ${mediaNoun(this.mediaType)}…`;
     await this.updateComplete;
     await new Promise((resolve) => window.setTimeout(resolve, VIEWER_FADE_DURATION_MS));
     await this.loadPhotos({
@@ -369,6 +467,7 @@ class FamilyArchiveApp extends LitElement {
   }
 
   handleViewerKeydown(event) {
+    if (event.target?.closest?.("video")) return;
     if (event.key === "ArrowRight") {
       event.preventDefault();
       this.moveViewer(1);
@@ -382,7 +481,11 @@ class FamilyArchiveApp extends LitElement {
   }
 
   currentPhoto() {
-    return this.items.find((item) => rotationKey(item) === this.selectedPhotoKey) || null;
+    return this.items.find((item) => entryKey(item) === this.selectedPhotoKey) || null;
+  }
+
+  handleVideoError(item) {
+    this.videoPlaybackErrorKey = entryKey(item);
   }
 
   layoutViewerImage(image, rotation = Number(image.dataset.rotation)) {
@@ -415,28 +518,31 @@ class FamilyArchiveApp extends LitElement {
   }
 
   renderImageViewer(item, itemIndex) {
+    const isVideo = item?.media_type === "video";
+    const noun = mediaNoun(this.mediaType);
+    const plural = mediaPlural(this.mediaType);
     if (!item) {
-      return html`<section class="image-viewer" aria-label="Photograph viewer">
+      return html`<section class="image-viewer" aria-label=${`${noun} viewer`}>
         <button class="button button-light viewer-back" type="button" @click=${() => this.closeViewer()}>
-          Back to photographs
+          Back to ${plural}
         </button>
-        <p class="viewer-message" role="status">The selected photograph is unavailable.</p>
+        <p class="viewer-message" role="status">The selected ${noun} is unavailable.</p>
       </section>`;
     }
-    const rotation = this.rotations[rotationKey(item)] || 0;
+    const rotation = rotationFor(this.rotations, item);
     const position = this.offset + itemIndex + 1;
     const imageSource = viewerImageSource(item);
     const previewOnly = requiresPreviewForViewer(item);
     return html`
       <section
         class="image-viewer"
-        aria-label="Photograph viewer"
+        aria-label=${`${noun[0].toUpperCase()}${noun.slice(1)} viewer`}
         tabindex="-1"
         @keydown=${(event) => this.handleViewerKeydown(event)}
       >
         <header class="viewer-toolbar">
           <button class="button button-light viewer-back" type="button" @click=${() => this.closeViewer()}>
-            <span aria-hidden="true">←</span> Back to photographs
+            <span aria-hidden="true">←</span> Back to ${plural}
           </button>
           <div class="viewer-heading">
             <h1>${item.filename}</h1>
@@ -447,9 +553,9 @@ class FamilyArchiveApp extends LitElement {
             <button
               class="rotation-edit-toggle viewer-edit-toggle"
               type="button"
-              title="Adjust image rotation"
-              aria-label=${`Adjust rotation for ${item.filename}`}
-              aria-expanded=${this.editingRotationKey === rotationKey(item)}
+              title=${isVideo ? "Edit file tags" : "Edit image and tags"}
+              aria-label=${isVideo ? `Edit tags for ${item.filename}` : `Edit ${item.filename}`}
+              aria-expanded=${this.editingRotationKey === entryKey(item)}
               @click=${() => this.toggleRotationEditor(item)}
             >✎</button>
             <a
@@ -459,22 +565,25 @@ class FamilyArchiveApp extends LitElement {
               title=${`Download ${item.filename}`}
               aria-label=${`Download ${item.filename}`}
             ><span aria-hidden="true">↓</span><span class="download-label">Download</span></a>
-            ${this.editingRotationKey === rotationKey(item)
-              ? html`<div class="rotation-controls viewer-rotation-controls" role="group" aria-label=${`Rotate image ${item.filename}`}>
-                  <button
-                    class="icon-button"
-                    type="button"
-                    title="Rotate 90° counterclockwise"
-                    aria-label=${`Rotate ${item.filename} 90 degrees counterclockwise`}
-                    @click=${() => this.rotatePhoto(item, -90)}
-                  >↺</button>
-                  <button
-                    class="icon-button"
-                    type="button"
-                    title="Rotate 90° clockwise"
-                    aria-label=${`Rotate ${item.filename} 90 degrees clockwise`}
-                    @click=${() => this.rotatePhoto(item, 90)}
-                  >↻</button>
+            ${this.editingRotationKey === entryKey(item)
+              ? html`<div class="viewer-edit-panel">
+                  ${isVideo ? "" : html`<div class="rotation-controls viewer-rotation-controls" role="group" aria-label=${`Rotate image ${item.filename}`}>
+                    <button
+                      class="icon-button"
+                      type="button"
+                      title="Rotate 90° counterclockwise"
+                      aria-label=${`Rotate ${item.filename} 90 degrees counterclockwise`}
+                      @click=${() => this.rotatePhoto(item, -90)}
+                    >↺</button>
+                    <button
+                      class="icon-button"
+                      type="button"
+                      title="Rotate 90° clockwise"
+                      aria-label=${`Rotate ${item.filename} 90 degrees clockwise`}
+                      @click=${() => this.rotatePhoto(item, 90)}
+                    >↻</button>
+                  </div>`}
+                  ${this.renderFileTags(item)}
                 </div>`
               : ""}
           </div>
@@ -483,12 +592,22 @@ class FamilyArchiveApp extends LitElement {
           <button
             class="viewer-nav"
             type="button"
-            aria-label="Previous photograph"
+            aria-label=${`Previous ${noun}`}
             ?disabled=${position <= 1 || this.viewerLoading || this.viewerTransitioning}
             @click=${() => this.moveViewer(-1)}
           >‹</button>
-          <figure class="viewer-image-stage">
-            ${imageSource
+          <figure class="viewer-image-stage ${isVideo ? "viewer-video-stage" : ""}">
+            ${isVideo
+              ? html`<video
+                  class="viewer-video"
+                  src=${item.playback_url || item.play_url || item.original_url}
+                  controls
+                  preload="metadata"
+                  playsinline
+                  aria-label=${item.filename}
+                  @error=${() => this.handleVideoError(item)}
+                ></video>`
+              : imageSource
               ? html`<img
                   class="viewer-image"
                   src=${imageSource}
@@ -503,13 +622,15 @@ class FamilyArchiveApp extends LitElement {
           <button
             class="viewer-nav"
             type="button"
-            aria-label="Next photograph"
+            aria-label=${`Next ${noun}`}
             ?disabled=${position >= this.total || this.viewerLoading || this.viewerTransitioning}
             @click=${() => this.moveViewer(1)}
           >›</button>
         </div>
         <p class="viewer-message" role="status">
-          ${this.viewerMessage || (previewOnly
+          ${this.viewerMessage || (isVideo && this.videoPlaybackErrorKey === entryKey(item)
+            ? html`This browser could not play this video format. <a href=${item.download_url || item.original_url} download=${item.filename}>Download the preserved original</a>.`
+            : previewOnly
             ? html`${imageSource ? "Showing a JPEG preview. " : "No JPEG preview is available. "}<a href=${item.download_url || item.original_url} download=${item.filename}>Download preserved TIFF original</a>.`
             : "")}
         </p>
@@ -519,18 +640,18 @@ class FamilyArchiveApp extends LitElement {
 
   async rotatePhoto(item, degrees) {
     const key = rotationKey(item);
-    const current = this.rotations[key] || 0;
+    const current = rotationFor(this.rotations, item);
     this.rotations = {
       ...this.rotations,
       [key]: rotateAngle(current, degrees),
     };
     try {
       window.localStorage.setItem(ROTATION_STORAGE_KEY, JSON.stringify(this.rotations));
-      this.libraryMessage = "Thumbnail rotation saved in this browser.";
+      this.libraryMessage = "Rotation saved for identical copies in this browser.";
     } catch {
       this.libraryMessage = "Rotation applied for this visit, but browser storage is unavailable.";
     }
-    if (this.viewerOpen && key === this.selectedPhotoKey) {
+    if (this.viewerOpen && entryKey(item) === this.selectedPhotoKey) {
       await this.updateComplete;
       const image = this.querySelector(".viewer-image");
       if (image?.complete && image.naturalWidth > 0) {
@@ -540,7 +661,7 @@ class FamilyArchiveApp extends LitElement {
   }
 
   toggleRotationEditor(item) {
-    const key = rotationKey(item);
+    const key = entryKey(item);
     this.editingRotationKey = this.editingRotationKey === key ? "" : key;
   }
 
@@ -558,10 +679,86 @@ class FamilyArchiveApp extends LitElement {
     `;
   }
 
+  handleTagDraft(event, item) {
+    this.tagDrafts = { ...this.tagDrafts, [item.sha256]: event.currentTarget.value };
+  }
+
+  async addFileTag(event, item) {
+    event.preventDefault();
+    const value = (this.tagDrafts[item.sha256] || "").trim();
+    if (!value || (item.tags || []).some((tag) => tag.toLocaleLowerCase() === value.toLocaleLowerCase())) {
+      return;
+    }
+    const result = await this.saveFileTags(item, [...(item.tags || []), value]);
+    if (result) this.tagDrafts = { ...this.tagDrafts, [item.sha256]: "" };
+  }
+
+  async removeFileTag(item, tag) {
+    await this.saveFileTags(item, (item.tags || []).filter((value) => value !== tag));
+  }
+
+  async saveFileTags(item, tags) {
+    const digest = item.sha256;
+    if (this.savingTagHashes.includes(digest)) return false;
+    this.savingTagHashes = [...this.savingTagHashes, digest];
+    this.libraryMessage = "Saving tags…";
+    try {
+      const result = await updateFileTags({
+        sha256: digest,
+        tags,
+        expectedVersion: item.tag_version || 0,
+      });
+      this.items = this.items.map((current) => current.sha256 === digest
+        ? { ...current, tags: result.tags, tag_version: result.version }
+        : current);
+      this.libraryMessage = "Tags saved for this file and any identical copies.";
+      if (this.query.trim()) await this.loadPhotos({ offset: this.offset });
+      return true;
+    } catch (error) {
+      this.libraryMessage = error.message;
+      return false;
+    } finally {
+      this.savingTagHashes = this.savingTagHashes.filter((value) => value !== digest);
+    }
+  }
+
+  renderFileTags(item) {
+    const saving = this.savingTagHashes.includes(item.sha256);
+    return html`
+      <div class="file-tags" aria-label=${`Tags for ${item.filename}`}>
+        <div class="file-tag-list">
+          ${(item.tags || []).map((tag) => html`
+            <span class="file-tag">
+              ${tag}
+              <button
+                type="button"
+                aria-label=${`Remove tag ${tag} from ${item.filename}`}
+                ?disabled=${saving}
+                @click=${() => this.removeFileTag(item, tag)}
+              >×</button>
+            </span>
+          `)}
+        </div>
+        <form class="file-tag-form" @submit=${(event) => this.addFileTag(event, item)}>
+          <input
+            type="text"
+            maxlength="50"
+            placeholder="Add a tag"
+            aria-label=${`Add a tag to ${item.filename}`}
+            .value=${this.tagDrafts[item.sha256] || ""}
+            ?disabled=${saving}
+            @input=${(event) => this.handleTagDraft(event, item)}
+          />
+          <button type="submit" aria-label=${`Add tag to ${item.filename}`} ?disabled=${saving}>Add</button>
+        </form>
+      </div>
+    `;
+  }
+
   renderPhoto(item) {
     const key = rotationKey(item);
-    const rotation = this.rotations[key] || 0;
-    const editingRotation = this.editingRotationKey === key;
+    const rotation = rotationFor(this.rotations, item);
+    const editingRotation = this.editingRotationKey === entryKey(item);
     const sourceLabel = this.sources.find((source) => source.source_id === item.source_id)?.volume_label;
     const sourceText = [sourceLabel, item.source_id, item.path].filter(Boolean).join(" · ");
     return html`
@@ -624,6 +821,41 @@ class FamilyArchiveApp extends LitElement {
     `;
   }
 
+  renderVideo(item) {
+    const sourceLabel = this.sources.find((source) => source.source_id === item.source_id)?.volume_label;
+    const sourceText = [sourceLabel, item.source_id, item.path].filter(Boolean).join(" · ");
+    return html`
+      <article class="photo-card video-card">
+        <div class="photo-preview video-preview">
+          <button
+            class="video-link"
+            type="button"
+            aria-label=${`Play ${item.filename} from ${item.source_id}`}
+            @click=${() => this.openPhoto(item)}
+          >
+            ${item.thumbnail_url
+              ? html`<img class="video-thumbnail" src=${item.thumbnail_url} alt="" loading="lazy" />`
+              : ""}
+            <span class="video-play-icon" aria-hidden="true">▶</span>
+            <span class="video-play-label">Play video</span>
+          </button>
+          <a
+            class="download-button thumbnail-download"
+            href=${item.download_url || item.original_url}
+            download=${item.filename}
+            title=${`Download ${item.filename}`}
+            aria-label=${`Download ${item.filename}`}
+            @click=${(event) => event.stopPropagation()}
+          ><span aria-hidden="true">↓</span></a>
+        </div>
+        <div class="photo-caption">
+          <span class="photo-filename">${item.filename}</span>
+          <span>${sourceText}</span>
+        </div>
+      </article>
+    `;
+  }
+
   goToPage(page) {
     const pageCount = Math.ceil(this.total / this.pageSize);
     if (!Number.isInteger(page) || page < 1 || page > pageCount) return;
@@ -644,7 +876,7 @@ class FamilyArchiveApp extends LitElement {
     const notPublished = this.view === "library" && !this.items.length && this.total === 0;
     const viewerPhoto = this.viewerOpen ? this.currentPhoto() : null;
     const viewerIndex = viewerPhoto
-      ? this.items.findIndex((item) => rotationKey(item) === this.selectedPhotoKey)
+      ? this.items.findIndex((item) => entryKey(item) === this.selectedPhotoKey)
       : -1;
     const pageCount = Math.max(1, Math.ceil(this.total / this.pageSize));
     const currentPage = Math.floor(this.offset / this.pageSize) + 1;
@@ -699,10 +931,14 @@ class FamilyArchiveApp extends LitElement {
                 <div class="library-heading">
                   <div>
                     <p class="eyebrow">From your family archive</p>
-                    <h2 id="library-title" tabindex="-1">Photographs</h2>
+                    <h2 id="library-title" tabindex="-1">
+                      ${this.mediaType === "video" ? "Videos" : "Photographs"}
+                    </h2>
                   </div>
                   <p class="library-count">
-                    ${this.total.toLocaleString()} ${this.total === 1 ? "photograph" : "photographs"}
+                    ${this.total.toLocaleString()} ${this.mediaType === "video"
+                      ? (this.total === 1 ? "video" : "videos")
+                      : (this.total === 1 ? "photograph" : "photographs")}
                   </p>
                 </div>
                 <div class="library-filters">
@@ -716,30 +952,68 @@ class FamilyArchiveApp extends LitElement {
                       @input=${(event) => this.handleSearch(event)}
                     />
                   </label>
-                  <label class="source-filter">
-                    <span class="visually-hidden">Filter by source disc</span>
-                    <select .value=${this.sourceId} @change=${(event) => this.handleSource(event)}>
-                      <option value="">All discs</option>
+                  <details class="source-filter">
+                    <summary aria-label="Filter by source disc">
+                      ${this.sourceIds.length === 0
+                        ? "All discs"
+                        : `${this.sourceIds.length} disc${this.sourceIds.length === 1 ? "" : "s"} selected`}
+                      <span aria-hidden="true">⌄</span>
+                    </summary>
+                    <div class="source-options" role="group" aria-label="Filter by source disc">
+                      <button
+                        class="source-clear"
+                        type="button"
+                        ?disabled=${this.sourceIds.length === 0}
+                        @click=${() => this.clearSources()}
+                      >Clear selection · show all discs</button>
                       ${this.sources.map((source) => html`
-                        <option value=${source.source_id}>
-                          ${source.volume_label
+                        <label class="source-option">
+                          <input
+                            type="checkbox"
+                            value=${source.source_id}
+                            .checked=${this.sourceIds.includes(source.source_id)}
+                            @change=${(event) => this.handleSource(event)}
+                          />
+                          <span>${source.volume_label
                             ? `${source.volume_label} · ${source.source_id}`
-                            : source.source_id}
-                        </option>
+                            : source.source_id}</span>
+                        </label>
                       `)}
-                    </select>
-                  </label>
+                    </div>
+                  </details>
                 </div>
                 <div class="library-options">
+                  <div class="view-switch media-switch" role="group" aria-label="Media type">
+                    <button
+                      class="view-button ${this.mediaType === "photo" ? "selected" : ""}"
+                      type="button"
+                      aria-pressed=${this.mediaType === "photo"}
+                      @click=${() => this.selectMediaType("photo")}
+                    >Photos</button>
+                    <button
+                      class="view-button ${this.mediaType === "video" ? "selected" : ""}"
+                      type="button"
+                      aria-pressed=${this.mediaType === "video"}
+                      @click=${() => this.selectMediaType("video")}
+                    >Videos</button>
+                  </div>
                   <label class="page-size-filter">
-                    <span>Photos per page</span>
+                    <span>${this.mediaType === "video" ? "Videos per page" : "Photos per page"}</span>
                     <select .value=${String(this.pageSize)} @change=${(event) => this.handlePageSize(event)}>
                       ${PAGE_SIZE_OPTIONS.map(
                         (count) => html`<option value=${count}>${count}</option>`,
                       )}
                     </select>
                   </label>
-                  <div class="view-switch" role="group" aria-label="Photo layout">
+                  <label class="sort-filter">
+                    <span>Sort by</span>
+                    <select .value=${this.sort} @change=${(event) => this.handleSort(event)}>
+                      <option value="archive">Archive order</option>
+                      <option value="newest">File date (newest first)</option>
+                      <option value="oldest">File date (oldest first)</option>
+                    </select>
+                  </label>
+                  <div class="view-switch" role="group" aria-label=${`${this.mediaType === "video" ? "Video" : "Photo"} layout`}>
                     <button
                       class="view-button ${this.layout === "grid" ? "selected" : ""}"
                       type="button"
@@ -758,7 +1032,9 @@ class FamilyArchiveApp extends LitElement {
                 ${notPublished
                   ? ""
                   : html`<div class="photo-grid ${this.layout === "list" ? "photo-grid-list" : ""}">
-                      ${this.items.map((item) => this.renderPhoto(item))}
+                      ${this.items.map((item) => this.mediaType === "video"
+                        ? this.renderVideo(item)
+                        : this.renderPhoto(item))}
                       ${this.loading && this.items.length === 0
                         ? Array.from(
                             { length: placeholderCount(this.total, this.offset, this.pageSize) },
@@ -768,7 +1044,7 @@ class FamilyArchiveApp extends LitElement {
                     </div>`}
                 ${this.total > 0 && !notPublished
                   ? html`
-                      <nav class="pagination" aria-label="Photograph pages">
+                      <nav class="pagination" aria-label=${`${this.mediaType === "video" ? "Video" : "Photograph"} pages`}>
                         <div class="pagination-controls">
                           <button
                             class="pagination-arrow"

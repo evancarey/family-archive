@@ -180,6 +180,28 @@ structures, hidden/unmounted sessions, filesystem slack, or other raw-disc
 details; choose image mode when preserving the disc itself matters. `--files-only`
 currently supports confirmed ordinary mounted data CDs and DVDs only.
 
+To archive a folder from your Mac, use directory source mode. It archives all
+regular files in the tree (not only images), keeps their relative paths, records
+empty directories and symlink targets without following symlinks, and verifies
+each uploaded file by SHA-256. The source folder is only read; keep it and the
+configured local catalog/work/log directories separate. Preview first:
+
+```sh
+family-archive ingest --directory "/path/to/family photos" --dry-run
+family-archive ingest --directory "/path/to/family photos" --notes "Scanned family photos"
+# If interrupted, resume with the permanent source ID printed by the command:
+family-archive ingest --directory "/path/to/family photos" --resume SRC-####
+```
+
+Directory ingestion uploads files under `sources/SRC-####/data/` and publishes a
+versioned manifest and catalog backups. It does not create a disk image or capture
+filesystem features outside the visible directory entries and recorded metadata.
+Files up to 64 MiB upload with at most four concurrent S3 requests. S3's
+server-validated SHA-256 checksum is checked from the successful response; if
+the response omits it, the program checks the stored checksum or falls back to a
+full read-back. Larger files retain the resumable multipart path. The source is
+still re-inventoried and re-hashed after upload to detect changes during capture.
+
 If an image-mode attempt failed before any image data or manifest was saved,
 `--resume SRC-#### --files-only` can continue that source in files-only mode.
 The command refuses this switch once an image checkpoint or upload exists.
@@ -308,23 +330,53 @@ downloading existing objects again. Existing thumbnails are reused only after
 validating them as private JPEG files. Files larger than 5 GB are rejected
 pending a multipart publishing implementation.
 
+Some original video codecs are not playable in web browsers (for example AVI,
+or MOV files whose video stream uses an older codec). Install FFmpeg with
+`brew install ffmpeg`, then add `--video-playback` when materializing to create
+replaceable H.264/AAC MP4 copies under the private derived-library area. This
+never changes the archived videos; the website uses the MP4 when available and
+keeps the preserved original as its download. Failed conversions leave that
+video's original playable through a compatible desktop application or
+downloadable from the site. The same flag also creates a bounded JPEG thumbnail
+from a frame about three seconds into each video, falling back to the first
+frame for short clips. The Videos grid uses this preview. Use the flag on each
+publish that should include playback copies and thumbnails. Both derivatives
+are cached locally and reused after verification.
+For photo-only incremental updates, the `--video-playback` flag can be omitted:
+playback references from the last verified library index are retained for
+existing videos, while newly added videos remain downloadable in their original
+format until playback derivatives are requested.
+
 For routine updates when the local cache is available, add `--incremental`:
 
 ```sh
 family-archive library materialize \
   --config archive-config.local.toml \
   --cache-dir ~/.family-archive/library-cache \
-  --incremental --publish
+  --incremental --publish --video-playback
 ```
 
-Incremental mode re-hashes cached media against the manifest, fetches only
-missing media from the archive, reuses valid local thumbnails, checks the
-content-addressed S3 objects, and publishes a complete refreshed index last.
+Incremental mode uses a private local verification checkpoint at
+`<cache-dir>/.family-archive-verification.json`. After a file has been checked
+against its manifest, unchanged file identity (device, inode, size, timestamps,
+and permissions) lets later runs reuse that verification without reading all
+its bytes again. Changed, missing, or uncheckpointed files are fully hashed;
+missing media is fetched from the archive. This trusts the local checkpoint and
+filesystem metadata to detect ordinary changes; use `--reuse-verified-cache`
+to re-hash every cached media file, or omit `--incremental` for a full source
+and S3 audit. Thumbnail and playback derivatives use the same local checkpoint
+after their first successful validation. Direct media fetches, thumbnail work,
+and S3 publishing use bounded worker pools; the CLI reports stage progress as
+work completes. `--video-playback` creates missing video copies and frame
+thumbnails and includes them in the index.
 If the cache is empty, this naturally performs a full materialization. Without
 `--incremental`, materialization continues to read and verify source objects
-for a full reconciliation. If a local cache is lost, a future cache-restore
-command could download the published library objects directly from S3 instead
-of rereading disc images and regenerating thumbnails.
+and checks all published S3 objects for a full reconciliation. Incremental mode
+trusts objects referenced by the latest verified index; it does not detect an
+object later removed or changed outside this application. Run without
+`--incremental` for a complete S3 object audit. If a local cache is lost, a
+future cache-restore command could download the published library objects
+directly from S3 instead of rereading disc images and regenerating thumbnails.
 
 Preview publishing without downloading or writing anything by adding
 `--publish --dry-run` to the materialize command. To materialize locally and
@@ -344,10 +396,13 @@ only for the active browser tab, and keeps the token session in tab-scoped
 with Cognito's refresh-token grant; closing the tab clears the session. With a
 published derived index, it can
 show searchable photos in a paginated grid or list, choose 10–100 photos per
-page, rotate thumbnail previews, and open originals through short-lived links
-issued by the authenticated API. The current page, page size, search, source,
-and layout are restored after reload in the same tab. Rotations affect only the
-browser preview and are saved locally in that browser for future visits.
+page, add shared tags to files, rotate thumbnail previews, and open originals
+through short-lived links issued by the authenticated API. Search includes file
+tags. Photos and videos can be sorted by recorded
+file modification date, newest or oldest; items without a date follow dated
+items. The current page, page size, search, selected discs, sort order, and layout are
+restored after reload in the same tab. Rotations affect only the browser preview
+and are saved locally in that browser for future visits.
 Copy
 `web/config.example.json` to `web/public/config.json` and fill in the
 Terraform outputs before hosting; that file is ignored by Git. Run these from

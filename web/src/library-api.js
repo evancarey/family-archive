@@ -27,15 +27,27 @@ export const checkLibraryApi = async () => {
   return result.status === "ready";
 };
 
-export const fetchPhotos = async ({ query, sourceId, offset, limit = 30 }) => {
+export const fetchLibraryMedia = async ({
+  query,
+  sourceId = "",
+  sourceIds = sourceId ? [sourceId] : [],
+  offset,
+  limit = 30,
+  mediaType = "photo",
+  sort = "archive",
+}) => {
+  if (!["photo", "video"].includes(mediaType)) {
+    throw new TypeError("The library media type must be photo or video.");
+  }
   const config = getPresentationConfig();
   const url = new URL(endpoint(config.apiUrl, "/api/library"));
   url.search = new URLSearchParams({
     limit: String(limit),
     offset: String(offset),
-    media: "photo",
+    media: mediaType,
+    sort,
     q: query,
-    source: sourceId,
+    source: sourceIds.join(","),
   });
   const token = await getValidAccessToken();
   if (!token) throw new SignInRequiredError();
@@ -52,4 +64,25 @@ export const fetchPhotos = async ({ query, sourceId, offset, limit = 30 }) => {
     items: Array.isArray(payload.items) ? payload.items.slice(0, limit) : [],
   };
   return { status: response.status, payload: page };
+};
+
+export const fetchPhotos = (options) =>
+  fetchLibraryMedia({ ...options, mediaType: "photo" });
+
+export const updateFileTags = async ({ sha256, tags, expectedVersion }) => {
+  const token = await getValidAccessToken();
+  if (!token) throw new SignInRequiredError();
+  const config = getPresentationConfig();
+  const response = await fetch(endpoint(config.apiUrl, "/api/tags"), {
+    method: "PUT",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ sha256, tags, expected_version: expectedVersion }),
+    cache: "no-store",
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || "Tags could not be saved.");
+  return payload;
 };

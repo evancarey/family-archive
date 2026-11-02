@@ -8,6 +8,7 @@ import stat
 import subprocess
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -35,6 +36,8 @@ from family_archive.multisession import (
     track_metadata,
 )
 from family_archive.storage import Storage, StorageError
+
+FILE_UPLOAD_WORKERS = 4
 
 
 class IngestionError(Exception):
@@ -192,6 +195,42 @@ def select_files_only_resume(device: str, saved_inspection: dict) -> Inspection:
     return Inspection(**saved_inspection)
 
 
+def directory_inspection(path: Path) -> Inspection:
+    """Describe a local directory as a read-only archival source."""
+    supplied = Path(path).expanduser()
+    if supplied.is_symlink():
+        raise ValueError(f"Directory source must not be a symbolic link: {supplied}")
+    root = supplied.resolve(strict=True)
+    if not root.is_dir():
+        raise ValueError(f"Directory source is not a directory: {root}")
+    return Inspection(
+        device=str(root),
+        media="Directory",
+        volume=root.name or str(root),
+        mount_point=str(root),
+        filesystem="local filesystem",
+        capacity=None,
+        tracks=None,
+        classification="DIRECTORY",
+        reason="Local directory archived as visible files; source is read-only.",
+        inspection_supported=True,
+    )
+
+
+def ingest_directory(
+    path: Path,
+    config: Config,
+    storage: Storage,
+    resume: str | None = None,
+    notes: str = "",
+    announce=print,
+) -> str:
+    """Archive a local directory tree without modifying its contents."""
+    return ingest(
+        directory_inspection(path), config, storage, resume, notes, announce, files_only=True
+    )
+
+
 def hold_mounted_volume(device: str, saved_inspection: dict | None = None) -> tuple[int, str]:
     """Open and pin the read-only optical volume before discovery traverses it."""
     try:
@@ -246,6 +285,9 @@ def ingest(
     device_opener=None,
     files_only: bool = False,
 ) -> str:
+    directory_source = report.classification == "DIRECTORY"
+    if directory_source and not files_only:
+        raise ValueError("Directory sources support file archival only")
     if files_only and (not report.mount_point or not Path(report.mount_point).is_dir()):
         raise ValueError(
             f"{report.device}: mounted volume is unavailable at "
@@ -262,6 +304,7 @@ def ingest(
     )
     ordinary_files_only = (
         files_only
+        and not directory_source
         and report.classification in {"DATA CD", "DATA DVD"}
         and report.tracks == 1
         and report.sessions == 1
@@ -278,7 +321,11 @@ def ingest(
         and len(report.session_layout) == report.sessions
         and bool(report.volume_device)
     )
-    if not (ordinary_files_only or (ordinary or supported_multi) and not files_only):
+    if not (
+        directory_source
+        or ordinary_files_only
+        or (ordinary or supported_multi) and not files_only
+    ):
         raise ValueError(
             "Only confirmed ordinary data CDs/DVDs or one-data-track-per-session "
             "Mode 2 multisession CDs can be ingested"
@@ -317,7 +364,8 @@ def _ingest(
         and report.session_layout[0].get("sectors", 0) * 2048 == report.image_size
     )
     archive_size = report.archive_image_size or report.image_size
-    archive_mode = "files_only" if files_only else "image"
+    is_directory = report.classification == "DIRECTORY"
+    archive_mode = "directory_files" if is_directory else "files_only" if files_only else "image"
     destination = {"bucket": config.bucket, "prefix": config.prefix}
     if resume:
         record = catalog.get(resume)
@@ -341,6 +389,8 @@ def _ingest(
                 raise ValueError(f"{resume}: archive mode differs from the original ingestion")
             record["archive_mode"] = archive_mode
         original = record["inspection"]
+        if is_directory and original.get("mount_point") != report.mount_point:
+            raise ValueError(f"{resume}: directory path differs from the original source")
         for key in (
             "media",
             "volume",
@@ -696,11 +746,18 @@ def _ingest_files_only(
 ):
     """Archive visible regular files without requiring a readable full-disc image."""
     source_root = Path(report.mount_point).resolve()
-    step("inventory and SHA-256 visible files from the mounted source")
+    step(
+        "inventory and SHA-256 files from the selected directory"
+        if report.classification == "DIRECTORY"
+        else "inventory and SHA-256 visible files from the mounted source"
+    )
     entries = inventory(source_root)
     catalog.save_files(source_id, entries)
-    record["inventory_origin"] = "source_mount"
-    record["source_type"] = report.classification.lower().replace(" ", "_")
+    is_directory = report.classification == "DIRECTORY"
+    record["inventory_origin"] = "directory" if is_directory else "source_mount"
+    record["source_type"] = (
+        "directory" if is_directory else report.classification.lower().replace(" ", "_")
+    )
     record["file_count"] = sum(entry["kind"] == "file" for entry in entries)
     record["directory_count"] = sum(entry["kind"] == "directory" for entry in entries)
     record["logical_file_size"] = sum(entry.get("size", 0) for entry in entries)
@@ -708,29 +765,64 @@ def _ingest_files_only(
 
     file_prefix = config.key(f"sources/{source_id}/data")
     uploads = record.setdefault("file_uploads", {})
-    for index, entry in enumerate(entries, start=1):
-        if entry["kind"] != "file":
-            continue
-        relative = PurePosixPath(entry["path"])
-        source_path = source_root.joinpath(*relative.parts)
-        object_key = f"{file_prefix}/{entry['path']}"
-        step(f"upload and verify file {index} of {len(entries)}: {entry['path']}")
-        checkpoint = uploads.setdefault(entry["path"], {})
-        if entry["size"] <= 64 * 1024 * 1024 and hasattr(storage, "ensure_small_file"):
-            storage.ensure_small_file(object_key, source_path, entry["sha256"])
-        else:
-            storage.ensure_file(object_key, source_path, entry["sha256"], checkpoint, save)
-        entry["object_key"] = object_key
-        catalog.save_file(source_id, entry)
-        uploads[entry["path"]] = {
-            "object_key": object_key,
-            "size": entry["size"],
-            "sha256": entry["sha256"],
-            "verified": True,
-        }
-        save()
 
-    step("recheck mounted source files after upload")
+    file_entries = [entry for entry in entries if entry["kind"] == "file"]
+    small_entries = [
+        entry
+        for entry in file_entries
+        if entry["size"] <= 64 * 1024 * 1024 and hasattr(storage, "ensure_small_file")
+    ]
+    large_entries = [entry for entry in file_entries if entry not in small_entries]
+
+    def upload_small(entry):
+        source_path = source_root.joinpath(*PurePosixPath(entry["path"]).parts)
+        storage.ensure_small_file(
+            f"{file_prefix}/{entry['path']}", source_path, entry["sha256"]
+        )
+
+    completed = 0
+    failed_upload = None
+    with ThreadPoolExecutor(max_workers=FILE_UPLOAD_WORKERS) as executor:
+        futures = {executor.submit(upload_small, entry): entry for entry in small_entries}
+        for future in as_completed(futures):
+            entry = futures[future]
+            try:
+                future.result()
+            except Exception as exc:
+                if failed_upload is None:
+                    failed_upload = exc
+                continue
+            completed += 1
+            _record_uploaded_file(
+                catalog,
+                record,
+                source_id,
+                entry,
+                f"{file_prefix}/{entry['path']}",
+                uploads,
+                save,
+            )
+            step(f"upload and verify file {completed} of {len(file_entries)}: {entry['path']}")
+
+    if failed_upload is not None:
+        raise failed_upload
+
+    for entry in large_entries:
+        source_path = source_root.joinpath(*PurePosixPath(entry["path"]).parts)
+        object_key = f"{file_prefix}/{entry['path']}"
+        step(f"upload and verify file {completed + 1} of {len(file_entries)}: {entry['path']}")
+        checkpoint = uploads.setdefault(entry["path"], {})
+        storage.ensure_file(object_key, source_path, entry["sha256"], checkpoint, save)
+        _record_uploaded_file(
+            catalog, record, source_id, entry, object_key, uploads, save
+        )
+        completed += 1
+
+    step(
+        "recheck directory files after upload"
+        if is_directory
+        else "recheck mounted source files after upload"
+    )
     recheck = inventory(source_root)
     fields = ("path", "kind", "size", "sha256", "target", "mtime_ns", "mode")
     if [[entry.get(key) for key in fields] for entry in entries] != [
@@ -752,7 +844,9 @@ def _ingest_files_only(
         manifest = {
             "schema_version": FILES_ONLY_SCHEMA_VERSION,
             "source_id": source_id,
-            "source_type": report.classification.lower().replace(" ", "_"),
+            "source_type": (
+                "directory" if is_directory else report.classification.lower().replace(" ", "_")
+            ),
             "archive_status": "COMPLETE",
             "started_at": record["started_at"],
             "completed_at": now(),
@@ -764,12 +858,16 @@ def _ingest_files_only(
                 "full_disc_image": False,
                 "object_prefix": file_prefix,
                 "scope": (
-                    "Regular files visible on the mounted read-only filesystem, with original "
+                    "Regular files visible in the selected local directory tree, with original "
+                    "relative paths. The source is read-only; filesystem-level metadata outside "
+                    "the recorded file and directory entries is not included."
+                    if is_directory
+                    else "Regular files visible on the mounted read-only filesystem, with original "
                     "relative paths. Raw disc sectors, boot structures, and content not exposed "
                     "by the mounted filesystem are not included."
                 ),
             },
-            "inventory_origin": "source_mount",
+            "inventory_origin": "directory" if is_directory else "source_mount",
             "file_count": record["file_count"],
             "directory_count": record["directory_count"],
             "logical_file_size": record["logical_file_size"],
@@ -803,3 +901,15 @@ def _ingest_files_only(
         "no full disc image captured"
     )
     return source_id
+
+
+def _record_uploaded_file(catalog, record, source_id, entry, object_key, uploads, save):
+    entry["object_key"] = object_key
+    catalog.save_file(source_id, entry)
+    uploads[entry["path"]] = {
+        "object_key": object_key,
+        "size": entry["size"],
+        "sha256": entry["sha256"],
+        "verified": True,
+    }
+    save()

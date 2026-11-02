@@ -80,7 +80,12 @@ media.
    documented in [MULTISESSION.md](MULTISESSION.md); it does not imply support
    for audio, video, or mixed-mode media. This milestone remains future work.
 7. **Drive and directory file archival:** explicit file/image modes and scalable
-   checkpoints for other source types.
+   checkpoints for other source types. Local directory ingestion is implemented:
+   `ingest --directory PATH` archives visible files with relative paths, hashes,
+   read-back verification, resumable checkpoints, manifest provenance, and
+   catalog backups. Automated tests cover completion, interruption/resume, and
+   path identity. Removable and fixed-drive discovery/image modes remain future
+   work; no live S3 directory ingestion has been performed.
 8. **Derived family library:** metadata, thumbnails, optional deduplication and
    conversions, leaving archival masters intact. Recommended first slice:
    build a read-only media index from completed source manifests; show photos
@@ -101,7 +106,10 @@ media.
    `sips`, then conditionally publishes verified media and thumbnails under the
    private `library/` prefix and the content-addressed index last. Source
    archive objects remain unchanged; retries reuse verified objects, checking
-   S3 SHA-256 checksums and validated private thumbnail cache files. A live
+   S3 SHA-256 checksums and validated private thumbnail cache files. With
+   `--video-playback`, FFmpeg also creates browser-compatible MP4 derivatives
+   and JPEG frame thumbnails for the Videos grid; originals remain unchanged.
+   A live
    publish completed on 2026-10-25: 1,347 media records from six sources,
    1,480,159,492 media bytes, and 57,907,498 thumbnail bytes. Forty-four
    multisession records remain unsupported; one original JPEG was published
@@ -115,18 +123,23 @@ media.
    A live publish on 2026-10-30 updated the library to 4,825 media records from
    eight sources (5,200,292,792 media bytes and 111,974,970 thumbnail bytes).
    Incremental materialization is implemented with
-   `library materialize --incremental`: it rehashes present cache files against
-   the manifest, downloads only missing media from archive objects, skips
-   already-cached files in disc images, reuses validated local thumbnails, and
-   publishes the complete refreshed index last. The default path remains a full
-   source read and verification for reconciliation; an empty cache in incremental
-   mode also performs a full materialization. S3 content-addressed media and
-   thumbnail objects are checked by checksum on each publish, so this version
-   avoids repeat source downloads and thumbnail conversion but still makes S3
-   object checks for the complete publication. Recovery directly from published
-   library objects and parallel processing remain future improvements. Automated
-   tests cover reuse and missing-cache behavior; live incremental publishing has
-   not yet been validated.
+   `library materialize --incremental`: a private local checkpoint reuses hashes
+   for unchanged cache files, and changed or uncheckpointed files are rehashed.
+   Missing media is fetched, cached image entries are reused, and cached
+   thumbnails/playback files are reused after their initial validation. Direct
+   media downloads, thumbnail generation, video conversion, and S3 publication
+   use bounded worker pools with live progress output. The full audit path remains
+   available through `--reuse-verified-cache` or a non-incremental materialize;
+   an empty cache still requires full materialization. Incremental publishing reads
+   and hash-checks the latest immutable index as a checkpoint, reusing S3 object
+   references whose keys, sizes, and SHA-256 values match; new or unreferenced
+   content is checked before the new index is published last. Non-incremental
+   publishing continues to verify all S3 objects. This trusts previously
+   indexed derived objects to remain unchanged; a full publish is the audit path
+   for detecting out-of-band changes. Recovery directly from published library
+   objects remains a future improvement. Automated tests
+   cover reuse and missing-cache behavior; live incremental publishing has not
+   yet been validated.
 9. **Family web interface:** nontechnical browsing of the derived library.
    The requested access scope is anywhere with sign-in. Initial AWS-oriented
    design: Cognito family sign-in, a hosted responsive app, and an authenticated
@@ -134,15 +147,17 @@ media.
    prefix. Keep archive objects private; return short-lived access to selected
    originals only. Do not provision cloud resources until the implementation,
    account allow-list, and access rules are reviewable. Start with photo search
-   and browsing; add video, audio, and document views in later slices. See
+   and browsing; add audio and document views in later slices. See
    [PRESENTATION_PLAN.md](PRESENTATION_PLAN.md) for the proposed security
    boundary and first-slice acceptance criteria.
    The first static web client is implemented in `web/` with Vite and Lit: a
    responsive sign-in page, Cognito authorization-code flow with PKCE,
-   tab-scoped session restoration and refresh, and searchable, paginated photo
-   grid. The authenticated API
-   reads the newest content-addressed library index and returns short-lived
-   signed media links. Terraform applied 23 presentation resources on
+   persistent browse preferences, searchable and paginated photo/video views,
+   native inline video playback, and original downloads. The authenticated API
+   reads the newest content-addressed library index and returns expiring signed
+   media links. Optional H.264/AAC playback derivatives address browser codec
+   incompatibility without changing archived originals.
+   Terraform applied 23 presentation resources on
    2026-10-25; the existing archive bucket was only read. The built site is
    deployed at https://d1nbk1tlbv97a1.cloudfront.net/. Its security headers
    were checked, and both API routes returned HTTP 401 without a token. The

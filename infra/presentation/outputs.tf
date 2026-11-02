@@ -27,3 +27,8 @@ output "web_bucket_name" {
   description = "Private S3 bucket that CloudFront uses to serve the web client."
   value       = aws_s3_bucket.web.bucket
 }
+
+output "library_tags_table_name" {
+  description = "DynamoDB table holding shared annotations for derived library files."
+  value       = aws_dynamodb_table.library_tags.name
+}

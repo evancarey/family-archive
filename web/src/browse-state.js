@@ -7,8 +7,10 @@ const defaults = () => ({
   offset: 0,
   pageSize: 30,
   query: "",
-  sourceId: "",
+  sourceIds: [],
+  mediaType: "photo",
   layout: "grid",
+  sort: "archive",
 });
 
 export const readBrowseState = (storage = globalThis.localStorage) => {
@@ -25,11 +27,17 @@ export const readBrowseState = (storage = globalThis.localStorage) => {
       ? saved.offset
       : 0;
     return {
-      offset: Math.floor(requestedOffset / pageSize) * pageSize,
+      offset: requestedOffset,
       pageSize,
       query: typeof saved.query === "string" ? saved.query : "",
-      sourceId: typeof saved.sourceId === "string" ? saved.sourceId : "",
+      sourceIds: Array.isArray(saved.sourceIds)
+        ? [...new Set(saved.sourceIds.filter((sourceId) => typeof sourceId === "string" && sourceId))]
+        : typeof saved.sourceId === "string" && saved.sourceId
+        ? [saved.sourceId]
+        : [],
+      mediaType: saved.mediaType === "video" ? "video" : "photo",
       layout: saved.layout === "list" ? "list" : "grid",
+      sort: ["archive", "newest", "oldest"].includes(saved.sort) ? saved.sort : "archive",
     };
   } catch {
     return defaults();
@@ -42,10 +50,15 @@ export const writeBrowseState = (state, storage = globalThis.localStorage) => {
       offset: Number.isSafeInteger(state.offset) && state.offset >= 0 ? state.offset : 0,
       pageSize: PAGE_SIZE_OPTIONS.includes(state.pageSize) ? state.pageSize : 30,
       query: typeof state.query === "string" ? state.query : "",
-      sourceId: typeof state.sourceId === "string" ? state.sourceId : "",
+      sourceIds: Array.isArray(state.sourceIds)
+        ? [...new Set(state.sourceIds.filter((sourceId) => typeof sourceId === "string" && sourceId))]
+        : typeof state.sourceId === "string" && state.sourceId
+        ? [state.sourceId]
+        : [],
+      mediaType: state.mediaType === "video" ? "video" : "photo",
       layout: state.layout === "list" ? "list" : "grid",
+      sort: ["archive", "newest", "oldest"].includes(state.sort) ? state.sort : "archive",
     };
-    value.offset = Math.floor(value.offset / value.pageSize) * value.pageSize;
     storage.setItem(STORAGE_KEY, JSON.stringify(value));
     return true;
   } catch {

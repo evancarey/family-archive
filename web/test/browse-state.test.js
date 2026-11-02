@@ -20,15 +20,17 @@ test("browse state survives reload with current page and filters", () => {
     offset: 60,
     pageSize: 30,
     query: "summer",
-    sourceId: "SRC-0002",
+    sourceIds: ["SRC-0002", "SRC-0004"],
+    mediaType: "video",
     layout: "list",
+    sort: "newest",
   };
 
   assert.equal(writeBrowseState(state, storage), true);
   assert.deepEqual(readBrowseState(storage), state);
 });
 
-test("browse state clamps invalid offsets and ignores unsupported values", () => {
+test("browse state preserves valid offsets and ignores unsupported values", () => {
   const storage = new MemoryStorage();
   storage.setItem(
     "family-archive:browse-state:v1",
@@ -36,12 +38,30 @@ test("browse state clamps invalid offsets and ignores unsupported values", () =>
   );
 
   assert.deepEqual(readBrowseState(storage), {
-    offset: 30,
+    offset: 57,
     pageSize: 30,
     query: "",
-    sourceId: "",
+    sourceIds: [],
+    mediaType: "photo",
     layout: "grid",
+    sort: "archive",
   });
+});
+
+test("browse state keeps an unaligned offset after changing page size", () => {
+  const storage = new MemoryStorage();
+  const state = {
+    offset: 2980,
+    pageSize: 30,
+    query: "",
+    sourceIds: [],
+    mediaType: "photo",
+    layout: "grid",
+    sort: "archive",
+  };
+
+  assert.equal(writeBrowseState(state, storage), true);
+  assert.deepEqual(readBrowseState(storage), state);
 });
 
 test("browse preferences default to persistent local storage", () => {
@@ -57,8 +77,10 @@ test("browse preferences default to persistent local storage", () => {
       offset: 20,
       pageSize: 10,
       query: "portrait",
-      sourceId: "SRC-0001",
+      sourceIds: ["SRC-0001"],
+      mediaType: "photo",
       layout: "list",
+      sort: "oldest",
     };
     assert.equal(writeBrowseState(expected), true);
     assert.deepEqual(readBrowseState(), expected);
@@ -66,6 +88,16 @@ test("browse preferences default to persistent local storage", () => {
     if (descriptor) Object.defineProperty(globalThis, "localStorage", descriptor);
     else delete globalThis.localStorage;
   }
+});
+
+test("migrates a saved single-disc filter to the multi-disc preference", () => {
+  const storage = new MemoryStorage();
+  storage.setItem(
+    "family-archive:browse-state:v1",
+    JSON.stringify({ sourceId: "SRC-0007" }),
+  );
+
+  assert.deepEqual(readBrowseState(storage).sourceIds, ["SRC-0007"]);
 });
 
 test("migrates a tab-scoped browse preference into local storage", () => {
@@ -88,6 +120,7 @@ test("migrates a tab-scoped browse preference into local storage", () => {
 
   try {
     assert.equal(readBrowseState().pageSize, 10);
+    assert.equal(readBrowseState().sort, "archive");
     assert.equal(JSON.parse(persistent.getItem("family-archive:browse-state:v1")).pageSize, 10);
   } finally {
     if (previousLocal) Object.defineProperty(globalThis, "localStorage", previousLocal);

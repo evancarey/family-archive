@@ -79,9 +79,21 @@ def main(argv: list[str] | None = None) -> int:
             "the complete index is still published"
         ),
     )
-    ingest_parser = commands.add_parser("ingest", help="Capture a data CD/DVD and archive it to S3")
-    ingest_parser.add_argument(
-        "--device", required=True, help="Inspected whole device, e.g. /dev/disk5"
+    library_materialize.add_argument(
+        "--video-playback",
+        action="store_true",
+        help=(
+            "Create browser-friendly H.264/AAC MP4 derivatives from indexed videos; "
+            "requires ffmpeg and ffprobe"
+        ),
+    )
+    ingest_parser = commands.add_parser(
+        "ingest", help="Archive a data CD/DVD or local directory to S3"
+    )
+    source_group = ingest_parser.add_mutually_exclusive_group(required=True)
+    source_group.add_argument("--device", help="Inspected whole optical device, e.g. /dev/disk5")
+    source_group.add_argument(
+        "--directory", type=Path, help="Local directory tree to archive without modifying it"
     )
     ingest_parser.add_argument("--resume", metavar="SRC-ID", help="Resume this catalog source ID")
     ingest_parser.add_argument(
@@ -301,13 +313,19 @@ def ingest_command(args) -> int:
     from family_archive.config import load_config
     from family_archive.ingest import (
         IngestionError,
+        directory_inspection,
         hold_mounted_volume,
         ingest,
+        ingest_directory,
         select_files_only_resume,
         select_source,
     )
 
     mount_guard_fd = None
+
+    def announce(message):
+        print(message, flush=True)
+
     try:
         config = load_config(
             args.config,
@@ -323,6 +341,26 @@ def ingest_command(args) -> int:
             from family_archive.storage.s3 import connect
 
             storage = connect(config.bucket, config.profile)
+        if args.directory is not None:
+            if args.files_only:
+                raise ValueError(
+                    "--files-only applies to optical devices; --directory is already files-only"
+                )
+            report = directory_inspection(args.directory)
+            config.validate_paths(Path(report.mount_point))
+            if args.dry_run:
+                print(f"Source directory: {report.mount_point}")
+                print(f"Destination: s3://{config.bucket}/{config.key('sources/')}")
+                print(
+                    "Plan: inventory all entries, preserve relative paths, upload each regular "
+                    "file, SHA-256 read-back, manifest, catalog backup."
+                )
+                print("Dry run only. No local archive data or S3 objects were written.")
+                return 0
+            ingest_directory(
+                args.directory, config, storage, args.resume, args.notes, announce=announce
+            )
+            return 0
         if args.files_only:
             saved_inspection = None
             if args.resume:
@@ -405,6 +443,7 @@ def ingest_command(args) -> int:
             storage,
             args.resume,
             args.notes,
+            announce=announce,
             files_only=args.files_only,
         )
         return 0
@@ -489,6 +528,7 @@ def library_command(args) -> int:
     from family_archive.library_assets import load_materialized_cache, materialize_library
     from family_archive.library_publish import publish_library
     from family_archive.library_thumbnails import generate_thumbnails
+    from family_archive.library_video import generate_video_playbacks
     from family_archive.storage.s3 import connect
 
     try:
@@ -500,6 +540,7 @@ def library_command(args) -> int:
             database=args.database,
         )
         reader = connect(config.bucket, config.profile)
+        print("Reading complete source manifests...", flush=True)
         index = load_library_index(reader, config)
         if args.library_command == "index":
             output = args.output.expanduser().resolve()
@@ -532,19 +573,28 @@ def library_command(args) -> int:
                 publish=args.publish,
                 reuse_cache=args.reuse_verified_cache,
                 incremental=args.incremental,
+                video_playback=args.video_playback,
             )
             return 0
 
-        result = (
-            load_materialized_cache(index, args.cache_dir)
-            if args.reuse_verified_cache
-            else materialize_library(
+        def report_progress(stage, completed, total):
+            if completed == 1 or completed % 25 == 0 or completed == total:
+                print(f"{stage}: {completed:,}/{total:,}", flush=True)
+
+        if args.reuse_verified_cache:
+            print("Hashing every local media cache file (full cache audit)...", flush=True)
+            result = load_materialized_cache(
+                index, args.cache_dir, progress=report_progress
+            )
+        else:
+            print("Checking cached media and fetching missing files...", flush=True)
+            result = materialize_library(
                 reader,
                 index,
                 args.cache_dir,
                 reuse_existing=args.incremental,
+                progress=report_progress,
             )
-        )
         print(
             f"Materialized {len(result.assets):,} unique media files into "
             f"{args.cache_dir.expanduser().resolve()}"
@@ -558,27 +608,67 @@ def library_command(args) -> int:
             print(f"Skipped {len(result.unsupported_items):,} multisession media items:")
             for item in result.unsupported_items:
                 print(f"  {item}")
+        playback_assets = ()
+        if args.video_playback:
+            print("Preparing browser-playable video copies...", flush=True)
+            playback_result = generate_video_playbacks(
+                index,
+                result,
+                args.cache_dir.expanduser() / ".video-playback",
+                progress=report_progress,
+            )
+            playback_assets = playback_result.assets
+            print(
+                f"Created or reused {len(playback_assets):,} browser-playable video copies "
+                f"({sum(asset.size for asset in playback_assets):,} bytes)."
+            )
+            if playback_result.failed_items:
+                print(
+                    f"Could not create playback copies for {len(playback_result.failed_items):,} "
+                    "videos; their originals remain available for download."
+                )
+                for item in playback_result.failed_items:
+                    print(f"  {item}")
         if args.publish:
+            print("Generating or reusing thumbnails...", flush=True)
             thumbnail_result = generate_thumbnails(
-                index, result, args.cache_dir.expanduser() / ".thumbnails"
+                index,
+                result,
+                args.cache_dir.expanduser() / ".thumbnails",
+                include_videos=args.video_playback,
+                progress=report_progress,
             )
             if thumbnail_result.failed_items:
                 print(
                     f"Could not create thumbnails for {len(thumbnail_result.failed_items):,} "
-                    "photos; their verified originals will still be published."
+                    "media items; their verified originals will still be published."
                 )
                 for item in thumbnail_result.failed_items:
                     print(f"  {item}")
+            print("Publishing verified library objects and the index last...", flush=True)
             published = publish_library(
-                reader, config, index, result, thumbnail_result.assets
+                reader,
+                config,
+                index,
+                result,
+                thumbnail_result.assets,
+                playback_assets,
+                reuse_published_objects=args.incremental,
+                progress=report_progress,
             )
             print(
                 f"Published {published.item_count:,} media records from "
                 f"{published.source_count:,} sources; "
                 f"{published.media_bytes:,} media bytes and "
-                f"{published.thumbnail_bytes:,} thumbnail bytes."
+                f"{published.thumbnail_bytes:,} thumbnail bytes and "
+                f"{published.playback_bytes:,} video playback bytes."
             )
             print(f"Library index: {config.bucket}/{published.key}")
+            if args.incremental:
+                print(
+                    f"Reused {published.reused_objects:,} previously verified S3 objects; "
+                    "new or unreferenced objects were verified before publishing."
+                )
         return 0
     except KeyboardInterrupt:
         retained = (
@@ -617,6 +707,7 @@ def _print_materialization_plan(
     publish: bool = False,
     reuse_cache: bool = False,
     incremental: bool = False,
+    video_playback: bool = False,
 ) -> None:
     supported = [
         item for item in index.items if item.original.kind in {"file_object", "image_entry"}
@@ -647,4 +738,11 @@ def _print_materialization_plan(
         photo_count = len({item.sha256 for item in supported if item.media_type == "photo"})
         print(f"Unique photo thumbnails: {photo_count:,} (up to 512 pixels)")
         print("Publish plan: verified originals and thumbnails under private library/; index last.")
+    if video_playback:
+        videos = {item.sha256: item.size for item in supported if item.media_type == "video"}
+        print(
+            f"Video playback copies: {len(videos):,} unique videos "
+            f"({sum(videos.values()):,} input bytes)"
+        )
+        print("Encoding plan: H.264/AAC MP4 derivatives; originals remain unchanged.")
     print("Dry run only. No media payloads were downloaded; no local or S3 objects were written.")

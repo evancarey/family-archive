@@ -37,6 +37,8 @@ const MOCK_ITEMS = Object.freeze(
       filename,
       path,
       sha256: number.toString(16).padStart(64, "0"),
+      media_type: "photo",
+      mtime_ns: Date.UTC(2000 + (number % 25), number % 12, (number % 27) + 1) * 1_000_000,
       thumbnail_url: imageUrl,
       original_url: imageUrl,
       download_url: imageUrl,
@@ -49,15 +51,26 @@ export const mockLibraryEnabled = () =>
   typeof window !== "undefined" &&
   new URLSearchParams(window.location.search).get("mockLibrary") === "1";
 
-export const readMockLibraryPage = ({ query = "", sourceId = "", offset = 0, limit = 30 }) => {
+export const readMockLibraryPage = ({
+  query = "",
+  sourceId = "",
+  sourceIds = sourceId ? [sourceId] : [],
+  mediaType = "photo",
+  sort = "archive",
+  offset = 0,
+  limit = 30,
+}) => {
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const filtered = MOCK_ITEMS.filter((item) => {
-    if (sourceId && item.source_id !== sourceId) return false;
+    if ((item.media_type || "photo") !== mediaType) return false;
+    if (sourceIds.length && !sourceIds.includes(item.source_id)) return false;
     if (!normalizedQuery) return true;
     return `${item.filename} ${item.path} ${item.volume_label} ${item.source_id}`
       .toLocaleLowerCase()
       .includes(normalizedQuery);
   });
+  if (sort === "newest") filtered.sort((a, b) => b.mtime_ns - a.mtime_ns);
+  if (sort === "oldest") filtered.sort((a, b) => a.mtime_ns - b.mtime_ns);
   return {
     sources: SOURCES,
     total: filtered.length,

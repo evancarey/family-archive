@@ -7,16 +7,20 @@ import stat
 import tempfile
 from collections import defaultdict
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 
+from family_archive.cache_verification import CacheVerification
 from family_archive.hashing import CHUNK_SIZE, hash_stream
 from family_archive.image_mount import mount_image
 from family_archive.library import LibraryIndex, LibraryItem
 from family_archive.multisession import Track, inventory_sessions
 from family_archive.storage import ArchiveReader
+
+MATERIALIZE_WORKERS = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +35,7 @@ class MaterializationResult:
     assets: tuple[DerivedAsset, ...]
     unsupported_items: tuple[str, ...] = ()
     reused_assets: int = 0
+    cache_verification: CacheVerification | None = None
 
 
 def materialize_library(
@@ -39,6 +44,7 @@ def materialize_library(
     cache_dir: Path,
     *,
     reuse_existing: bool = False,
+    progress=None,
 ) -> MaterializationResult:
     """Copy indexed media locally and verify bytes against their source manifests.
 
@@ -46,34 +52,41 @@ def materialize_library(
     the index retains every source path and its provenance.
     """
     cache = _prepare_cache(cache_dir)
+    verification = CacheVerification(cache)
     assets: dict[str, DerivedAsset] = {}
     image_items: dict[str, list[LibraryItem]] = defaultdict(list)
     multisession_items: dict[str, list[LibraryItem]] = defaultdict(list)
     unsupported_items = []
     reused_hashes: set[str] = set()
+    pending_objects = []
+    scheduled_hashes: set[str] = set()
 
-    for item in index.items:
+    def report_cache_progress(item_number):
+        if progress and (item_number % 100 == 0 or item_number == len(index.items)):
+            progress("Check media cache", item_number, len(index.items))
+
+    for item_number, item in enumerate(index.items, start=1):
         reference = item.original
         if reference.kind == "file_object":
             if reuse_existing and item.sha256 in assets:
+                report_cache_progress(item_number)
+                continue
+            if reuse_existing and item.sha256 in scheduled_hashes:
+                report_cache_progress(item_number)
                 continue
             target = _asset_path(cache, item.sha256) if reuse_existing else None
             if target is not None and (target.exists() or target.is_symlink()):
-                _require_matching_file(target, item.size, item.sha256)
+                verify_cached_file(target, item.size, item.sha256, verification)
                 assets[item.sha256] = DerivedAsset(item.sha256, item.size, target)
                 reused_hashes.add(item.sha256)
-                continue
-            assets[item.sha256] = _materialize_reader_object(
-                reader,
-                reference.object_key,
-                item.size,
-                item.sha256,
-                cache,
-            )
+            else:
+                pending_objects.append(item)
+                if reuse_existing:
+                    scheduled_hashes.add(item.sha256)
         elif reference.kind == "image_entry":
             target = _asset_path(cache, item.sha256) if reuse_existing else None
             if target is not None and (target.exists() or target.is_symlink()):
-                _require_matching_file(target, item.size, item.sha256)
+                verify_cached_file(target, item.size, item.sha256, verification)
                 assets[item.sha256] = DerivedAsset(item.sha256, item.size, target)
                 reused_hashes.add(item.sha256)
             else:
@@ -81,13 +94,48 @@ def materialize_library(
         elif reference.kind == "multisession_image_entry":
             target = _asset_path(cache, item.sha256) if reuse_existing else None
             if target is not None and (target.exists() or target.is_symlink()):
-                _require_matching_file(target, item.size, item.sha256)
+                verify_cached_file(target, item.size, item.sha256, verification)
                 assets[item.sha256] = DerivedAsset(item.sha256, item.size, target)
                 reused_hashes.add(item.sha256)
             else:
                 multisession_items[reference.object_key].append(item)
         else:  # guarded above; keep the dispatch exhaustive
             raise ValueError(f"Unsupported archive reference: {reference.kind}")
+        report_cache_progress(item_number)
+
+    if pending_objects:
+        with ThreadPoolExecutor(max_workers=MATERIALIZE_WORKERS) as executor:
+            futures = {
+                executor.submit(
+                    _materialize_reader_object,
+                    reader,
+                    item.original.object_key,
+                    item.size,
+                    item.sha256,
+                    cache,
+                ): item
+                for item in pending_objects
+            }
+            fetch_error = None
+            for completed, future in enumerate(as_completed(futures), start=1):
+                item = futures[future]
+                try:
+                    asset = future.result()
+                except Exception as exc:
+                    if fetch_error is None:
+                        fetch_error = exc
+                    if progress:
+                        progress("Fetch and verify media", completed, len(pending_objects))
+                    continue
+                assets[item.sha256] = asset
+                verification.remember(asset.path, asset.size, asset.sha256)
+                if completed % 25 == 0:
+                    verification.save()
+                if progress:
+                    progress("Fetch and verify media", completed, len(pending_objects))
+            verification.save()
+            if fetch_error is not None:
+                raise fetch_error
 
     for object_key in sorted(image_items):
         group = [item for item in image_items[object_key] if item.sha256 not in assets]
@@ -100,16 +148,24 @@ def materialize_library(
         if group:
             assets.update(_materialize_multisession(reader, group, cache))
 
+    for asset in assets.values():
+        verification.remember(asset.path, asset.size, asset.sha256)
+    verification.save()
+
     return MaterializationResult(
         assets=tuple(assets[key] for key in sorted(assets)),
         unsupported_items=tuple(unsupported_items),
         reused_assets=len(reused_hashes),
+        cache_verification=verification,
     )
 
 
-def load_materialized_cache(index: LibraryIndex, cache_dir: Path) -> MaterializationResult:
+def load_materialized_cache(
+    index: LibraryIndex, cache_dir: Path, progress=None
+) -> MaterializationResult:
     """Re-hash an existing cache against the current manifest index without S3 reads."""
     cache = _prepare_cache(cache_dir)
+    verification = CacheVerification(cache)
     sizes: dict[str, int] = {}
     unsupported_items = []
     for item in index.items:
@@ -120,11 +176,31 @@ def load_materialized_cache(index: LibraryIndex, cache_dir: Path) -> Materializa
             raise ValueError(f"Conflicting file sizes for content hash {item.sha256}")
 
     assets = []
-    for digest, size in sorted(sizes.items()):
+    for completed, (digest, size) in enumerate(sorted(sizes.items()), start=1):
         path = _asset_path(cache, digest)
         _require_matching_file(path, size, digest)
+        verification.remember(path, size, digest)
         assets.append(DerivedAsset(digest, size, path))
-    return MaterializationResult(tuple(assets), tuple(unsupported_items))
+        if progress and (completed % 100 == 0 or completed == len(sizes)):
+            progress("Audit local media cache", completed, len(sizes))
+    verification.save()
+    return MaterializationResult(
+        tuple(assets), tuple(unsupported_items), cache_verification=verification
+    )
+
+
+def verify_cached_file(
+    path: Path,
+    expected_size: int,
+    expected_hash: str,
+    verification: CacheVerification | None,
+) -> None:
+    """Reuse a prior local hash only while its private file identity is unchanged."""
+    if verification and verification.matches(path, expected_size, expected_hash):
+        return
+    _require_matching_file(path, expected_size, expected_hash)
+    if verification:
+        verification.remember(path, expected_size, expected_hash)
 
 
 def _materialize_multisession(

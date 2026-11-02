@@ -39,6 +39,20 @@ class S3Storage:
             for item in page.get("Contents", []):
                 yield item["Key"]
 
+    def latest_key(self, prefix: str) -> str | None:
+        """Return the most recently modified object under a prefix."""
+        latest = None
+        for page in self.client.get_paginator("list_objects_v2").paginate(
+            Bucket=self.bucket, Prefix=prefix
+        ):
+            for item in page.get("Contents", []):
+                if latest is None or (item["LastModified"], item["Key"]) > (
+                    latest["LastModified"],
+                    latest["Key"],
+                ):
+                    latest = item
+        return latest["Key"] if latest else None
+
     def matches(self, key: str, size: int, digest: str) -> bool:
         try:
             response = self.client.get_object(Bucket=self.bucket, Key=key)
@@ -76,24 +90,49 @@ class S3Storage:
             raise StorageError(f"Object missing after upload: {key}")
 
     def ensure_small_file(self, key: str, path: Path, sha256: str) -> None:
-        """Upload a regular file with one conditional PUT and verify a full read-back."""
+        """Upload a regular file and verify S3's stored SHA-256 checksum."""
         size = path.stat().st_size
-        if self.matches(key, size, sha256):
-            return
+        expected = base64.b64encode(bytes.fromhex(sha256)).decode()
         try:
             with path.open("rb") as stream:
-                self.client.put_object(
+                response = self.client.put_object(
                     Bucket=self.bucket,
                     Key=key,
                     Body=stream,
                     IfNoneMatch="*",
-                    ChecksumSHA256=base64.b64encode(bytes.fromhex(sha256)).decode(),
+                    ChecksumSHA256=expected,
                 )
         except ClientError as exc:
-            if exc.response["Error"]["Code"] not in {"PreconditionFailed", "412"}:
-                raise
-        if not self.matches(key, size, sha256):
+            if exc.response["Error"]["Code"] in {"PreconditionFailed", "412"}:
+                if self._matches_checksum(key, size, sha256):
+                    return
+                raise StorageError(f"Object missing after upload: {key}") from exc
+            raise
+        stored_checksum = response.get("ChecksumSHA256")
+        if stored_checksum is not None:
+            if stored_checksum != expected:
+                raise StorageError(f"S3 upload checksum differs: {key}")
+            return
+        if not self._matches_checksum(key, size, sha256):
             raise StorageError(f"Object missing after upload: {key}")
+
+    def _matches_checksum(self, key: str, size: int, sha256: str) -> bool:
+        """Use S3's independently calculated checksum, falling back to a full GET."""
+        try:
+            head = self.client.head_object(Bucket=self.bucket, Key=key, ChecksumMode="ENABLED")
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] in {"NoSuchKey", "404", "NotFound"}:
+                return False
+            raise
+        if head.get("ContentLength") != size:
+            raise StorageError(f"Existing object differs; not overwritten: {key}")
+        checksum = head.get("ChecksumSHA256")
+        if checksum is None:
+            return self.matches(key, size, sha256)
+        expected = base64.b64encode(bytes.fromhex(sha256)).decode()
+        if checksum != expected:
+            raise StorageError(f"Existing object differs; not overwritten: {key}")
+        return True
 
     def ensure_content_addressed_file(self, key: str, path: Path, sha256: str) -> None:
         """Conditionally upload a derived blob and verify S3's stored SHA-256."""

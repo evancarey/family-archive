@@ -105,3 +105,80 @@ test("renders no more photos than the selected page size if the API over-returns
   assert.equal(result.payload.total, 30);
   assert.equal(result.payload.items.length, 10);
 });
+
+test("requests a paginated video library page", async () => {
+  values.set(
+    "family-archive.oauth-session",
+    JSON.stringify({
+      accessToken: "video-token",
+      refreshToken: null,
+      expiresAt: Date.now() + 3_600_000,
+    }),
+  );
+  const auth = await import("../src/auth.js");
+  const { fetchLibraryMedia } = await import("../src/library-api.js");
+  assert.equal(await auth.finishSignIn(), true);
+
+  globalThis.fetch = async (url, options) => {
+    const requestUrl = new URL(url);
+    assert.equal(requestUrl.searchParams.get("media"), "video");
+    assert.equal(requestUrl.searchParams.get("limit"), "10");
+    assert.equal(requestUrl.searchParams.get("offset"), "20");
+    assert.equal(requestUrl.searchParams.get("sort"), "newest");
+    assert.equal(requestUrl.searchParams.get("source"), "SRC-0001,SRC-0002");
+    assert.equal(options.headers.authorization, "Bearer video-token");
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ total: 1, items: [{ filename: "home-movie.mov" }] }),
+    };
+  };
+
+  const result = await fetchLibraryMedia({
+    query: "movie",
+    sourceIds: ["SRC-0001", "SRC-0002"],
+    offset: 20,
+    limit: 10,
+    mediaType: "video",
+    sort: "newest",
+  });
+
+  assert.equal(result.payload.items[0].filename, "home-movie.mov");
+});
+
+test("saves shared file tags with an optimistic version", async () => {
+  values.set(
+    "family-archive.oauth-session",
+    JSON.stringify({
+      accessToken: "tag-token",
+      refreshToken: null,
+      expiresAt: Date.now() + 3_600_000,
+    }),
+  );
+  const auth = await import("../src/auth.js");
+  const { updateFileTags } = await import("../src/library-api.js");
+  assert.equal(await auth.finishSignIn(), true);
+
+  globalThis.fetch = async (url, options) => {
+    assert.equal(url, "https://api.example.test/api/tags");
+    assert.equal(options.method, "PUT");
+    assert.equal(options.headers.authorization, "Bearer tag-token");
+    assert.deepEqual(JSON.parse(options.body), {
+      sha256: "a".repeat(64),
+      tags: ["family"],
+      expected_version: 2,
+    });
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ sha256: "a".repeat(64), tags: ["family"], version: 3 }),
+    };
+  };
+
+  const result = await updateFileTags({
+    sha256: "a".repeat(64),
+    tags: ["family"],
+    expectedVersion: 2,
+  });
+  assert.equal(result.version, 3);
+});

@@ -47,11 +47,12 @@ def _validate(manifest: dict) -> None:
     if not re.fullmatch(r"SRC-\d{4,}", manifest.get("source_id", "")):
         raise ValueError("Invalid manifest source ID")
     version = manifest["schema_version"]
-    allowed_types = (
-        {"data_cd", "data_dvd"}
-        if version in {1, FILES_ONLY_SCHEMA_VERSION}
-        else {"multisession_data_cd"}
-    )
+    if version == SCHEMA_VERSION:
+        allowed_types = {"data_cd", "data_dvd"}
+    elif version == FILES_ONLY_SCHEMA_VERSION:
+        allowed_types = {"data_cd", "data_dvd", "directory"}
+    else:
+        allowed_types = {"multisession_data_cd"}
     if manifest.get("source_type") not in allowed_types:
         raise ValueError("Unsupported manifest source type")
     for key in ("started_at", "completed_at"):

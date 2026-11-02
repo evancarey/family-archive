@@ -4,6 +4,7 @@ from contextlib import contextmanager
 
 import pytest
 
+from family_archive import library_assets
 from family_archive.library import build_library_index
 from family_archive.library_assets import load_materialized_cache, materialize_library
 
@@ -155,7 +156,7 @@ def test_materialize_files_only_object_and_reuse_by_content_hash(tmp_path):
     asset = result.assets[0]
     assert asset.path.read_bytes() == content
     assert asset.path.name == hashlib.sha256(content).hexdigest()
-    assert reader.opened == list(objects)
+    assert sorted(reader.opened) == sorted(objects)
 
 
 def test_load_materialized_cache_rehashes_against_manifest_without_s3_reads(tmp_path):
@@ -205,6 +206,71 @@ def test_incremental_materialization_reuses_valid_files_and_fetches_only_new_med
     assert result.reused_assets == 1
     assert len(result.assets) == 2
     assert reader.opened == [new_key]
+    assert (tmp_path / "cache" / ".family-archive-verification.json").is_file()
+
+
+def test_incremental_cache_checkpoint_skips_hash_for_unchanged_verified_media(
+    tmp_path, monkeypatch
+):
+    content = b"checkpointed media"
+    source = files_only_manifest(
+        "SRC-0001", [file_entry("photo.jpg", content, "image/jpeg")]
+    )
+    index = build_library_index([source])
+    cache = tmp_path / "cache"
+    reader = MemoryReader({source["files"][0]["object_key"]: content})
+    materialize_library(reader, index, cache)
+    initial_reads = len(reader.opened)
+
+    def unexpected_hash(*_args, **_kwargs):
+        raise AssertionError("unchanged checkpointed file should not be rehashed")
+
+    monkeypatch.setattr("family_archive.library_assets._require_matching_file", unexpected_hash)
+    result = materialize_library(reader, index, cache, reuse_existing=True)
+
+    assert result.reused_assets == 1
+    assert len(reader.opened) == initial_reads
+
+
+def test_incremental_cache_checkpoint_rehashes_files_whose_identity_changes(tmp_path):
+    content = b"checkpointed media"
+    source = files_only_manifest(
+        "SRC-0001", [file_entry("photo.jpg", content, "image/jpeg")]
+    )
+    index = build_library_index([source])
+    cache = tmp_path / "cache"
+    reader = MemoryReader({source["files"][0]["object_key"]: content})
+    materialize_library(reader, index, cache)
+    digest = hashlib.sha256(content).hexdigest()
+    path = cache / digest[:2] / digest
+    path.write_bytes(b"tampered media!")
+    path.chmod(0o600)
+
+    with pytest.raises(ValueError, match="differs from manifest"):
+        materialize_library(reader, index, cache, reuse_existing=True)
+
+
+def test_full_cache_audit_rehashes_even_when_checkpoint_matches(tmp_path, monkeypatch):
+    content = b"checkpointed media"
+    source = files_only_manifest(
+        "SRC-0001", [file_entry("photo.jpg", content, "image/jpeg")]
+    )
+    index = build_library_index([source])
+    cache = tmp_path / "cache"
+    reader = MemoryReader({source["files"][0]["object_key"]: content})
+    materialize_library(reader, index, cache)
+    original = library_assets._require_matching_file
+    calls = []
+
+    def count_hashes(*args, **kwargs):
+        calls.append(args[0])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr("family_archive.library_assets._require_matching_file", count_hashes)
+
+    load_materialized_cache(index, cache)
+
+    assert len(calls) == 1
 
 
 def test_incremental_materialization_reuses_cached_image_entries_without_reading_image(

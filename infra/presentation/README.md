@@ -8,14 +8,18 @@ This Terraform root creates the first hosted presentation boundary:
 - an HTTPS-only CloudFront distribution with security response headers;
 - an API Gateway HTTP API with a Cognito JWT authorizer;
 - an authenticated Lambda whose IAM role can read and list only
-  the existing archive bucket's `library/` prefix.
+  the existing archive bucket's `library/` prefix, plus manage tags in a
+  dedicated DynamoDB table.
 
 The existing archive bucket is a Terraform data source. Terraform does not
 create, import, reconfigure, or delete it. The role has no access to `sources/`
-and no S3 write or delete permissions. The Lambda provides `GET /api/health`
-and authenticated `GET /api/library`. The library route reads the newest
-content-addressed index and issues short-lived pre-signed links for only the
-selected page of originals, thumbnails, and downloads.
+and no S3 write or delete permissions. The Lambda provides `GET /api/health`,
+authenticated `GET /api/library`, and `PUT /api/tags`. Shared tags are stored
+separately in a Terraform-managed, on-demand DynamoDB table keyed by file
+SHA-256. The table has point-in-time recovery and deletion protection. The
+library route reads the newest content-addressed index and issues short-lived
+pre-signed links for only the selected page of originals, thumbnails, and
+downloads.
 The CloudFront response policy includes a content security policy scoped to
 the static origin, regional API/Cognito endpoints, and the existing archive
 bucket's regional S3 hostname.
@@ -24,8 +28,9 @@ requires that certificate to use the `TLSv1` minimum security policy; enforcing
 a TLS 1.2 minimum requires a custom domain and ACM certificate.
 
 The infrastructure and static site have been deployed. The Cognito pool allows
-administrator-created accounts only. The API remains protected by Cognito, and
-the archive bucket grants the Lambda read access only under `library/`. The
+administrator-created accounts only. The API remains protected by Cognito. The
+archive bucket grants the Lambda read access only under `library/`; it cannot
+modify source archive objects. The
 first private library index is published with 1,347 media records from six
 sources. The user reports a family account has been created and signed in;
 authenticated library browsing still needs an end-to-end check.

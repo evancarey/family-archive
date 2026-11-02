@@ -32,8 +32,15 @@ credentials to a browser.
    transform an archival object.
 4. Present a responsive photo grid with filename search, source and year
    filters, a detail view, and an original-download action.
-5. Add video, audio, and document views after the photo flow has been tested
-   with actual family devices.
+5. The website now has a separate video view with paginated browsing, inline
+   native playback, previous/next navigation, and original downloads. Playback
+   uses an authorized, expiring URL with the indexed video MIME type. Browser
+   codec support varies; unsupported originals remain downloadable. Audio and
+   document views and richer video metadata remain later work. An opt-in
+   `library materialize --video-playback` step now creates replaceable H.264/AAC
+   MP4 copies for browser compatibility; source videos remain unchanged and
+   downloadable. The same step creates JPEG video-frame thumbnails for the
+   Videos grid, seeking to three seconds and falling back to the first frame.
 
 The initial index and local materializer are implemented as
 `family-archive library index` and `family-archive library materialize`. The
@@ -58,10 +65,12 @@ available with `library materialize --incremental --publish`: validate and reuse
 existing local content-addressed media, fetch only missing media from archived
 sources, reuse valid local thumbnails, and publish the complete refreshed index
 last. The default path remains a full source read for reconciliation; an empty
-cache in incremental mode also rebuilds from sources. Each publish still checks
-all content-addressed S3 objects. Direct cache recovery from published library
-objects, reducing remote checks, and parallel processing remain possible follow-up
-improvements. Live incremental publishing has not yet been validated.
+cache in incremental mode also rebuilds from sources. Incremental publishing
+uses the hash-checked latest index as a checkpoint and skips S3 checks for
+objects it already references; full publishing without `--incremental` remains
+the complete S3 audit path. Direct cache recovery from published library
+objects and parallel processing remain possible follow-up improvements. Live
+incremental publishing has not yet been validated.
 The user reports that a family account has been
 created and signed in; authenticated library browsing still needs an end-to-end
 check.
