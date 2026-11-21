@@ -55,6 +55,20 @@ def _open_inspection_device(device: str):
             time.sleep(1)
 
 
+def _prepare_source_recheck_directory(work: Path) -> Path:
+    """Preserve abandoned recheck output so an interrupted retry can start cleanly."""
+    directory = work / "source-recheck"
+    if directory.is_symlink():
+        raise ValueError(f"Source recheck directory must not be a symlink: {directory}")
+    if directory.exists():
+        if not directory.is_dir():
+            raise ValueError(f"Source recheck path is not a directory: {directory}")
+        if any(directory.iterdir()):
+            preserved = work / f"source-recheck-interrupted-{uuid.uuid4().hex}"
+            os.replace(directory, preserved)
+    return directory
+
+
 def now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -575,13 +589,14 @@ def _ingest(
         # Retain the second full optical read as an independent source check.
         step("confirm source identity after inventory")
         if multi:
+            recheck_dir = _prepare_source_recheck_directory(work)
             recheck = capture_tracks(
                 report.device,
                 report.volume_device,
                 Path(report.mount_point),
                 [item["start_lba"] for item in report.session_layout],
                 [item["sectors"] for item in report.session_layout],
-                work / "source-recheck",
+                recheck_dir,
             )
             if [track.sha256 for track in recheck] != [track.sha256 for track in tracks]:
                 raise ValueError("Source changed during inventory")

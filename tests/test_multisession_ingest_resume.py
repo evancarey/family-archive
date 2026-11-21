@@ -138,6 +138,23 @@ def get_record(database):
         catalog.close()
 
 
+def test_interrupted_source_recheck_data_is_preserved_before_retry(tmp_path):
+    from family_archive.ingest import _prepare_source_recheck_directory
+
+    work = tmp_path / "work" / "SRC-0001"
+    abandoned = work / "source-recheck"
+    abandoned.mkdir(parents=True)
+    (abandoned / "session-01.bin").write_bytes(b"partial capture")
+
+    retry_directory = _prepare_source_recheck_directory(work)
+
+    assert retry_directory == abandoned
+    assert not retry_directory.exists()
+    preserved = list(work.glob("source-recheck-interrupted-*"))
+    assert len(preserved) == 1
+    assert (preserved[0] / "session-01.bin").read_bytes() == b"partial capture"
+
+
 def test_multisession_ingestion_resumes_after_hard_process_exit(tmp_path):
     database = tmp_path / "archive.db"
     work_dir = tmp_path / "work"
