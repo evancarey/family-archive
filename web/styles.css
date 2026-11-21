@@ -174,6 +174,9 @@ h1 { max-width: 680px; font-size: clamp(48px, 8vw, 86px); letter-spacing: -.045e
 .viewer-edit-panel .file-tag-form { max-width: none; }
 .viewer-body { display: grid; grid-template-columns: 52px minmax(0, 1fr) 52px; align-items: center; justify-items: center; gap: 14px; min-height: 0; }
 .viewer-image-stage { position: relative; display: grid; place-items: center; width: min(100%, 1200px, calc((100vh - 180px) * 4 / 3)); aspect-ratio: 4 / 3; margin: 0; overflow: hidden; border-radius: 12px; background: #e3e4da; }
+.viewer-loading { position: absolute; z-index: 1; inset: 0; display: grid; place-items: center; }
+.viewer-spinner { width: 38px; height: 38px; border: 4px solid #cbd1c5; border-top-color: var(--green); border-radius: 50%; animation: viewer-spin 800ms linear infinite; }
+@keyframes viewer-spin { to { transform: rotate(360deg); } }
 .viewer-video { display: block; width: 100%; height: 100%; object-fit: contain; background: #e3e4da; }
 .viewer-image { position: absolute; top: 50%; left: 50%; display: block; width: 100%; height: 100%; max-width: 100%; max-height: 100%; object-fit: contain; object-position: center; opacity: 0; transform: translate(-50%, -50%); transition: opacity 200ms ease, transform 180ms ease; }
 .viewer-image[data-visible] { opacity: 1; }

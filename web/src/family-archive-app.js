@@ -608,7 +608,13 @@ class FamilyArchiveApp extends LitElement {
                   @error=${() => this.handleVideoError(item)}
                 ></video>`
               : imageSource
-              ? html`<img
+              ? html`${!this.viewerImageVisible
+                  ? html`<div class="viewer-loading" role="status">
+                      <span class="viewer-spinner" aria-hidden="true"></span>
+                      <span class="visually-hidden">Loading image…</span>
+                    </div>`
+                  : ""}
+                <img
                   class="viewer-image"
                   src=${imageSource}
                   alt=${item.filename}
