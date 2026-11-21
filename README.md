@@ -396,13 +396,16 @@ only for the active browser tab, and keeps the token session in tab-scoped
 with Cognito's refresh-token grant; closing the tab clears the session. With a
 published derived index, it can
 show searchable photos in a paginated grid or list, choose 10–100 photos per
-page, add shared tags to files, rotate thumbnail previews, and open originals
-through short-lived links issued by the authenticated API. Search includes file
+page, add shared tags, rotate previews, hide files from the derived library,
+and open originals through short-lived links issued by the authenticated API.
+Hidden files remain in the archive and can be restored; hiding can apply to one
+source/path copy or all copies with the same SHA-256 hash. Search includes file
 tags. Photos and videos can be sorted by recorded
 file modification date, newest or oldest; items without a date follow dated
 items. The current page, page size, search, selected discs, sort order, and layout are
 restored after reload in the same tab. Rotations affect only the browser preview
-and are saved locally in that browser for future visits.
+and are shared across users and identical file copies by SHA-256. The original
+archive files are never changed by rotation.
 Copy
 `web/config.example.json` to `web/public/config.json` and fill in the
 Terraform outputs before hosting; that file is ignored by Git. Run these from

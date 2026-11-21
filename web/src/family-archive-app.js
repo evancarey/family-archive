@@ -5,7 +5,9 @@ import {
   checkLibraryApi,
   fetchLibraryMedia,
   SignInRequiredError,
+  updateFileRotation,
   updateFileTags,
+  updateFileVisibility,
 } from "./library-api.js";
 import { PAGE_SIZE_OPTIONS, readBrowseState, writeBrowseState } from "./browse-state.js";
 import { pageTokens, placeholderCount } from "./pagination.js";
@@ -18,20 +20,7 @@ import {
 } from "./rotation.js";
 import { mockLibraryEnabled, readMockLibraryPage } from "./mock-library.js";
 
-const ROTATION_STORAGE_KEY = "family-archive:thumbnail-rotations:v1";
 const VIEWER_FADE_DURATION_MS = 200;
-
-const loadRotations = () => {
-  try {
-    const saved = JSON.parse(window.localStorage.getItem(ROTATION_STORAGE_KEY) || "{}");
-    if (!saved || typeof saved !== "object" || Array.isArray(saved)) return {};
-    return Object.fromEntries(
-      Object.entries(saved).filter(([, angle]) => [0, 90, 180, 270].includes(angle)),
-    );
-  } catch {
-    return {};
-  }
-};
 
 const entryKey = archiveEntryKey;
 const rotationKey = imageRotationKey;
@@ -69,6 +58,11 @@ class FamilyArchiveApp extends LitElement {
     videoPlaybackErrorKey: { state: true },
     tagDrafts: { state: true },
     savingTagHashes: { state: true },
+    visibilityMode: { state: true },
+    visibilityDrafts: { state: true },
+    savingVisibilityKeys: { state: true },
+    mockHiddenEntries: { state: true },
+    mockHiddenHashes: { state: true },
   };
 
   constructor() {
@@ -91,7 +85,7 @@ class FamilyArchiveApp extends LitElement {
     this.loading = false;
     this.layout = browseState.layout;
     this.sort = browseState.sort;
-    this.rotations = loadRotations();
+    this.rotations = {};
     this.editingRotationKey = "";
     this.viewerOpen = false;
     this.selectedPhotoKey = "";
@@ -102,6 +96,11 @@ class FamilyArchiveApp extends LitElement {
     this.videoPlaybackErrorKey = "";
     this.tagDrafts = {};
     this.savingTagHashes = [];
+    this.visibilityMode = "visible";
+    this.visibilityDrafts = {};
+    this.savingVisibilityKeys = [];
+    this.mockHiddenEntries = {};
+    this.mockHiddenHashes = {};
     this.requestId = 0;
     this.searchTimer = null;
     this.mockMode = mockLibraryEnabled();
@@ -232,6 +231,9 @@ class FamilyArchiveApp extends LitElement {
         sourceIds: this.sourceIds,
         mediaType: this.mediaType,
         sort: this.sort,
+        visibility: this.visibilityMode,
+        hiddenEntries: this.mockHiddenEntries,
+        hiddenHashes: this.mockHiddenHashes,
         offset,
         limit: this.pageSize,
       });
@@ -242,11 +244,23 @@ class FamilyArchiveApp extends LitElement {
       this.sources = page.sources;
       this.items = page.items;
       this.total = page.total;
+      const mockRotations = Object.fromEntries(
+        page.items
+          .filter((item) => [0, 90, 180, 270].includes(item.rotation))
+          .map((item) => [item.sha256, item.rotation]),
+      );
+      this.rotations = {
+        ...this.rotations,
+        ...mockRotations,
+      };
       this.offset = page.total === 0 ? 0 : offset;
       this.loading = false;
       this.libraryMessage = this.mediaType === "video"
         ? "The local preview contains sample photos only."
         : "Local mock data — downloads use sample SVGs, not archive originals.";
+      if (page.total === 0 && this.visibilityMode === "hidden") {
+        this.libraryMessage = "No hidden files match this view.";
+      }
       this.saveBrowseState();
       if (viewerTarget && page.items.length) {
         const targetItem = viewerTarget === "first" ? page.items[0] : page.items.at(-1);
@@ -270,6 +284,7 @@ class FamilyArchiveApp extends LitElement {
         limit: this.pageSize,
         mediaType: this.mediaType,
         sort: this.sort,
+        visibility: this.visibilityMode,
       });
       if (requestId !== this.requestId) return;
       if (status === 404) {
@@ -301,6 +316,11 @@ class FamilyArchiveApp extends LitElement {
       this.sources = payload.sources || [];
       this.items = payload.items;
       this.total = payload.total;
+      this.rotations = Object.fromEntries(
+        payload.items
+          .filter((item) => item.sha256)
+          .map((item) => [item.sha256, item.rotation || 0]),
+      );
       this.offset = payload.total === 0 ? 0 : offset;
       this.loading = false;
       this.saveBrowseState();
@@ -315,6 +335,8 @@ class FamilyArchiveApp extends LitElement {
       }
       this.libraryMessage = payload.items.length
         ? `Select a ${mediaNoun(this.mediaType)} to open it.`
+        : this.visibilityMode === "hidden"
+        ? "No hidden files match this view."
         : `No ${mediaPlural(this.mediaType)} match this search.`;
     } catch (error) {
       if (requestId !== this.requestId) return;
@@ -372,6 +394,18 @@ class FamilyArchiveApp extends LitElement {
     this.videoPlaybackErrorKey = "";
     this.libraryMessage = `Loading ${mediaPlural(mediaType)}…`;
     this.saveBrowseState(0);
+    this.loadPhotos({ offset: 0 });
+  }
+
+  selectVisibilityMode(visibilityMode) {
+    if (!new Set(["visible", "hidden"]).has(visibilityMode)
+      || visibilityMode === this.visibilityMode) return;
+    this.visibilityMode = visibilityMode;
+    this.offset = 0;
+    this.items = [];
+    this.libraryMessage = visibilityMode === "hidden"
+      ? "Loading hidden files…"
+      : `Loading ${mediaPlural(this.mediaType)}…`;
     this.loadPhotos({ offset: 0 });
   }
 
@@ -584,6 +618,7 @@ class FamilyArchiveApp extends LitElement {
                     >↻</button>
                   </div>`}
                   ${this.renderFileTags(item)}
+                  ${this.renderVisibilityControls(item)}
                 </div>`
               : ""}
           </div>
@@ -647,15 +682,38 @@ class FamilyArchiveApp extends LitElement {
   async rotatePhoto(item, degrees) {
     const key = rotationKey(item);
     const current = rotationFor(this.rotations, item);
-    this.rotations = {
-      ...this.rotations,
-      [key]: rotateAngle(current, degrees),
-    };
-    try {
-      window.localStorage.setItem(ROTATION_STORAGE_KEY, JSON.stringify(this.rotations));
-      this.libraryMessage = "Rotation saved for identical copies in this browser.";
-    } catch {
-      this.libraryMessage = "Rotation applied for this visit, but browser storage is unavailable.";
+    const rotation = rotateAngle(current, degrees);
+    if (this.mockMode) {
+      this.rotations = { ...this.rotations, [key]: rotation };
+      this.libraryMessage = "Local preview rotation applied.";
+    } else {
+      const digest = item.sha256;
+      if (this.savingTagHashes.includes(digest)) return;
+      this.savingTagHashes = [...this.savingTagHashes, digest];
+      this.rotations = { ...this.rotations, [key]: rotation };
+      this.libraryMessage = "Saving shared rotation…";
+      try {
+        const result = await updateFileRotation({
+          sha256: digest,
+          rotation,
+          expectedVersion: item.tag_version || 0,
+        });
+        this.items = this.items.map((currentItem) => currentItem.sha256 === digest
+          ? {
+            ...currentItem,
+            rotation: result.rotation,
+            tags: result.tags,
+            tag_version: result.version,
+          }
+          : currentItem);
+        this.rotations = { ...this.rotations, [key]: result.rotation };
+        this.libraryMessage = "Rotation saved for this file and identical copies.";
+      } catch (error) {
+        this.rotations = { ...this.rotations, [key]: current };
+        this.libraryMessage = error.message;
+      } finally {
+        this.savingTagHashes = this.savingTagHashes.filter((value) => value !== digest);
+      }
     }
     if (this.viewerOpen && entryKey(item) === this.selectedPhotoKey) {
       await this.updateComplete;
@@ -703,6 +761,100 @@ class FamilyArchiveApp extends LitElement {
     await this.saveFileTags(item, (item.tags || []).filter((value) => value !== tag));
   }
 
+  handleVisibilityReason(event, item) {
+    const key = entryKey(item);
+    this.visibilityDrafts = {
+      ...this.visibilityDrafts,
+      [key]: event.currentTarget.value,
+    };
+  }
+
+  async setFileVisibility(item, hidden, scope) {
+    const entry = entryKey(item);
+    const key = `${scope}:${scope === "content" ? item.sha256 : entry}`;
+    if (this.savingVisibilityKeys.includes(key)) return;
+    if (hidden && scope === "content"
+      && !window.confirm("Hide every identical copy of this file from the family library?")) {
+      return;
+    }
+    this.savingVisibilityKeys = [...this.savingVisibilityKeys, key];
+    this.libraryMessage = hidden ? "Hiding file from the library…" : "Restoring file to the library…";
+    const reason = (this.visibilityDrafts[entry] || "").trim();
+    try {
+      if (this.mockMode) {
+        if (scope === "content") {
+          const next = { ...this.mockHiddenHashes };
+          if (hidden) next[item.sha256] = true;
+          else delete next[item.sha256];
+          this.mockHiddenHashes = next;
+        } else {
+          const next = { ...this.mockHiddenEntries };
+          if (hidden) next[entry] = true;
+          else delete next[entry];
+          this.mockHiddenEntries = next;
+        }
+      } else {
+        await updateFileVisibility({
+          sha256: item.sha256,
+          sourceId: item.source_id,
+          path: item.path,
+          scope,
+          hidden,
+          reason,
+          expectedVersion: item.visibility_versions?.[scope] || 0,
+        });
+      }
+      this.viewerOpen = false;
+      this.selectedPhotoKey = "";
+      this.editingRotationKey = "";
+      this.items = [];
+      this.visibilityDrafts = { ...this.visibilityDrafts, [entry]: "" };
+      this.libraryMessage = hidden
+        ? (scope === "content"
+          ? "All identical copies are hidden from the family library; archived files are unchanged."
+          : "This copy is hidden from the family library; the archived file is unchanged.")
+        : "File visibility updated; the archived file is unchanged.";
+      await this.loadPhotos({ offset: this.offset });
+    } catch (error) {
+      this.libraryMessage = error.message;
+    } finally {
+      this.savingVisibilityKeys = this.savingVisibilityKeys.filter((value) => value !== key);
+    }
+  }
+
+  renderVisibilityControls(item) {
+    const entry = entryKey(item);
+    const hiddenScopes = item.hidden_scopes || [];
+    const entryKeyForSave = `entry:${entry}`;
+    const contentKeyForSave = `content:${item.sha256}`;
+    const disabled = this.savingVisibilityKeys.includes(entryKeyForSave)
+      || this.savingVisibilityKeys.includes(contentKeyForSave);
+    return html`
+      <section class="visibility-controls" aria-label="Library visibility">
+        ${hiddenScopes.includes("entry")
+          ? html`<button class="button button-light" type="button" ?disabled=${disabled}
+              @click=${() => this.setFileVisibility(item, false, "entry")}>Restore this copy</button>`
+          : ""}
+        ${hiddenScopes.includes("content")
+          ? html`<button class="button button-light" type="button" ?disabled=${disabled}
+              @click=${() => this.setFileVisibility(item, false, "content")}>Restore all identical copies</button>`
+          : ""}
+        ${hiddenScopes.length
+          ? ""
+          : html`<button class="button button-light" type="button" ?disabled=${disabled}
+              @click=${() => this.setFileVisibility(item, true, "entry")}>Hide this copy</button>
+            <button class="button button-light" type="button" ?disabled=${disabled}
+              @click=${() => this.setFileVisibility(item, true, "content")}>Hide all identical copies</button>
+            <label class="visibility-reason">
+              <span>Reason (optional)</span>
+              <input type="text" maxlength="250" placeholder="Add a note for the family"
+                .value=${this.visibilityDrafts[entry] || ""}
+                @input=${(event) => this.handleVisibilityReason(event, item)} />
+            </label>`}
+      </section>
+    `;
+  }
+
   async saveFileTags(item, tags) {
     const digest = item.sha256;
     if (this.savingTagHashes.includes(digest)) return false;
@@ -715,7 +867,12 @@ class FamilyArchiveApp extends LitElement {
         expectedVersion: item.tag_version || 0,
       });
       this.items = this.items.map((current) => current.sha256 === digest
-        ? { ...current, tags: result.tags, tag_version: result.version }
+        ? {
+          ...current,
+          tags: result.tags,
+          rotation: result.rotation,
+          tag_version: result.version,
+        }
         : current);
       this.libraryMessage = "Tags saved for this file and any identical copies.";
       if (this.query.trim()) await this.loadPhotos({ offset: this.offset });
@@ -879,7 +1036,11 @@ class FamilyArchiveApp extends LitElement {
     const signedIn = this.view === "library" && !this.mockMode;
     const libraryVisible = this.view === "library";
     const preview = this.view === "preview" || this.view === "signed-out";
-    const notPublished = this.view === "library" && !this.items.length && this.total === 0;
+    const notPublished = this.view === "library"
+      && !this.items.length
+      && this.total === 0
+      && this.visibilityMode === "visible"
+      && this.libraryMessage.includes("has not been published yet");
     const viewerPhoto = this.viewerOpen ? this.currentPhoto() : null;
     const viewerIndex = viewerPhoto
       ? this.items.findIndex((item) => entryKey(item) === this.selectedPhotoKey)
@@ -925,11 +1086,11 @@ class FamilyArchiveApp extends LitElement {
                   <div>
                     <p class="eyebrow">From your family archive</p>
                     <h2 id="library-title" tabindex="-1">
-                      ${this.mediaType === "video" ? "Videos" : "Photographs"}
+                      ${this.visibilityMode === "hidden" ? "Hidden " : ""}${this.mediaType === "video" ? "Videos" : "Photographs"}
                     </h2>
                   </div>
                   <p class="library-count">
-                    ${this.total.toLocaleString()} ${this.mediaType === "video"
+                    ${this.total.toLocaleString()} ${this.visibilityMode === "hidden" ? "hidden " : ""}${this.mediaType === "video"
                       ? (this.total === 1 ? "video" : "videos")
                       : (this.total === 1 ? "photograph" : "photographs")}
                   </p>
@@ -989,6 +1150,20 @@ class FamilyArchiveApp extends LitElement {
                       aria-pressed=${this.mediaType === "video"}
                       @click=${() => this.selectMediaType("video")}
                     >Videos</button>
+                  </div>
+                  <div class="view-switch visibility-switch" role="group" aria-label="Library visibility">
+                    <button
+                      class="view-button ${this.visibilityMode === "visible" ? "selected" : ""}"
+                      type="button"
+                      aria-pressed=${this.visibilityMode === "visible"}
+                      @click=${() => this.selectVisibilityMode("visible")}
+                    >Library</button>
+                    <button
+                      class="view-button ${this.visibilityMode === "hidden" ? "selected" : ""}"
+                      type="button"
+                      aria-pressed=${this.visibilityMode === "hidden"}
+                      @click=${() => this.selectVisibilityMode("hidden")}
+                    >Hidden items</button>
                   </div>
                   <label class="page-size-filter">
                     <span>${this.mediaType === "video" ? "Videos per page" : "Photos per page"}</span>

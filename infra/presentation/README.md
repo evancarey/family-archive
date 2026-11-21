@@ -8,18 +8,21 @@ This Terraform root creates the first hosted presentation boundary:
 - an HTTPS-only CloudFront distribution with security response headers;
 - an API Gateway HTTP API with a Cognito JWT authorizer;
 - an authenticated Lambda whose IAM role can read and list only
-  the existing archive bucket's `library/` prefix, plus manage tags in a
-  dedicated DynamoDB table.
+  the existing archive bucket's `library/` prefix, plus manage shared tags,
+  image rotations, and reversible visibility settings in dedicated DynamoDB
+  tables.
 
 The existing archive bucket is a Terraform data source. Terraform does not
 create, import, reconfigure, or delete it. The role has no access to `sources/`
 and no S3 write or delete permissions. The Lambda provides `GET /api/health`,
-authenticated `GET /api/library`, and `PUT /api/tags`. Shared tags are stored
-separately in a Terraform-managed, on-demand DynamoDB table keyed by file
-SHA-256. The table has point-in-time recovery and deletion protection. The
-library route reads the newest content-addressed index and issues short-lived
-pre-signed links for only the selected page of originals, thumbnails, and
-downloads.
+authenticated `GET /api/library`, `PUT /api/tags`, and `PUT /api/visibility`.
+Shared tags and image rotations are stored in a Terraform-managed, on-demand
+DynamoDB table keyed by file SHA-256. Visibility records use a separate,
+Terraform-managed table keyed by a source/path entry or content hash. Both
+tables have point-in-time recovery and deletion protection. The library route
+reads the newest content-addressed index and
+issues short-lived pre-signed links for only the selected page of originals,
+thumbnails, and downloads.
 The CloudFront response policy includes a content security policy scoped to
 the static origin, regional API/Cognito endpoints, and the existing archive
 bucket's regional S3 hostname.
@@ -87,7 +90,9 @@ invoking Lambda.
 The Vite/Lit static client is in `../../web/`. It implements the Cognito hosted
 sign-in redirect, calls the authenticated health route, and displays a
 searchable photo library with adjustable pagination, grid/list layouts, and
-thumbnail-only rotation controls. Original media remains private; the API
+thumbnail and viewer rotation controls. Rotations are shared by file hash;
+visibility can apply to one source/path copy or all identical copies. Both
+change only derived presentation state and never alter original media. Original media remains private; the API
 returns short-lived pre-signed links only after the JWT authorizer accepts the
 request.
 

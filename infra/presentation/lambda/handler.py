@@ -18,6 +18,7 @@ PRESIGNED_URL_SECONDS = 300
 PRESIGNED_VIDEO_URL_SECONDS = 3600
 MAX_TAGS_PER_FILE = 30
 MAX_TAG_LENGTH = 50
+MAX_VISIBILITY_REASON_LENGTH = 250
 
 
 def lambda_handler(event, _context):
@@ -37,6 +38,7 @@ def lambda_handler(event, _context):
                 os.environ["LIBRARY_PREFIX"],
                 event.get("queryStringParameters") or {},
                 _tag_table(),
+                _visibility_table() if os.environ.get("VISIBILITY_TABLE") else None,
             )
         except Exception:
             LOGGER.exception("Could not load the derived family library")
@@ -52,10 +54,26 @@ def lambda_handler(event, _context):
                 payload,
             )
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
-            return _response(400, {"error": f"Invalid tag request: {exc}"})
+            return _response(400, {"error": f"Invalid annotation request: {exc}"})
         except Exception:
-            LOGGER.exception("Could not update library tags")
-            return _response(500, {"error": "Tags could not be saved"})
+            LOGGER.exception("Could not update library annotations")
+            return _response(500, {"error": "File annotations could not be saved"})
+    if route == "PUT /api/visibility":
+        try:
+            payload = json.loads(event.get("body") or "{}")
+            return update_visibility_response(
+                _s3_client(),
+                _visibility_table(),
+                os.environ["LIBRARY_BUCKET"],
+                os.environ["LIBRARY_PREFIX"],
+                payload,
+                claims["sub"],
+            )
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            return _response(400, {"error": f"Invalid visibility request: {exc}"})
+        except Exception:
+            LOGGER.exception("Could not update library visibility")
+            return _response(500, {"error": "File visibility could not be saved"})
     return _response(404, {"error": "Not found"})
 
 
@@ -78,7 +96,13 @@ def _tag_table():
     return boto3.resource("dynamodb").Table(os.environ["ANNOTATIONS_TABLE"])
 
 
-def library_response(s3, bucket, prefix, query, tag_table=None):
+def _visibility_table():
+    import boto3
+
+    return boto3.resource("dynamodb").Table(os.environ["VISIBILITY_TABLE"])
+
+
+def library_response(s3, bucket, prefix, query, tag_table=None, visibility_table=None):
     """Read the newest immutable index and sign only the requested page."""
     try:
         offset = _bounded_integer(query.get("offset", "0"), 0, 10_000_000)
@@ -89,6 +113,9 @@ def library_response(s3, bucket, prefix, query, tag_table=None):
         sort_order = query.get("sort", "archive")
         if sort_order not in {"archive", "newest", "oldest"}:
             raise ValueError("Sort order must be archive, newest, or oldest")
+        visibility = query.get("visibility", "visible")
+        if visibility not in {"visible", "hidden"}:
+            raise ValueError("Visibility must be visible or hidden")
     except ValueError as exc:
         return _response(400, {"error": str(exc)})
 
@@ -127,6 +154,21 @@ def library_response(s3, bucket, prefix, query, tag_table=None):
         media_type,
         search_tags,
     )
+    visibility_records = _scan_visibility_records(visibility_table)
+    selected_items = []
+    for item in items:
+        scopes = _hidden_scopes(item, visibility_records)
+        if (visibility == "hidden") != bool(scopes):
+            continue
+        selected = dict(item)
+        selected["hidden_scopes"] = scopes
+        selected["visibility_versions"] = {
+            scope: int(visibility_records[_visibility_key(item, scope)].get("version", 0))
+            for scope in ("entry", "content")
+            if _visibility_key(item, scope) in visibility_records
+        }
+        selected_items.append(selected)
+    items = selected_items
     items = _sort_items(items, sort_order)
     page = items[offset : offset + limit]
     page_tags = _batch_read_tags(tag_table, [item.get("sha256", "") for item in page])
@@ -145,6 +187,7 @@ def library_response(s3, bucket, prefix, query, tag_table=None):
         annotation = page_tags.get(digest, {})
         signed["tags"] = annotation.get("tags", [])
         signed["tag_version"] = annotation.get("version", 0)
+        signed["rotation"] = annotation.get("rotation", 0)
         signed["original_url"] = s3.generate_presigned_url(
             "get_object",
             Params={"Bucket": bucket, "Key": media_key},
@@ -256,6 +299,7 @@ def library_response(s3, bucket, prefix, query, tag_table=None):
             "limit": limit,
             "sources": document["sources"],
             "items": signed_items,
+            "visibility": visibility,
         },
     )
 
@@ -340,6 +384,56 @@ def _scan_tag_map(table):
     }
 
 
+def _visibility_key(item, scope):
+    digest = item.get("sha256", "")
+    if scope == "content":
+        return f"content#{digest}"
+    identity = "\0".join(
+        (item.get("source_id", ""), item.get("path", ""), digest)
+    )
+    identity_hash = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    return f"entry#{identity_hash}"
+
+
+def _scan_visibility_records(table):
+    if table is None:
+        return {}
+    if hasattr(table, "read_all"):
+        records = table.read_all()
+    else:
+        records = []
+        request = {
+            "ProjectionExpression": "#key, #scope, #hidden, #version",
+            "ExpressionAttributeNames": {
+                "#key": "visibility_key",
+                "#scope": "scope",
+                "#hidden": "hidden",
+                "#version": "version",
+            },
+        }
+        while True:
+            response = table.scan(**request)
+            records.extend(response.get("Items", []))
+            last_key = response.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            request["ExclusiveStartKey"] = last_key
+    return {
+        record["visibility_key"]: record
+        for record in records
+        if isinstance(record.get("visibility_key"), str)
+    }
+
+
+def _hidden_scopes(item, records):
+    return [
+        scope
+        for scope in ("entry", "content")
+        if (record := records.get(_visibility_key(item, scope)))
+        and record.get("hidden") is True
+    ]
+
+
 def _batch_read_tags(table, digests):
     unique = sorted(
         {
@@ -351,41 +445,69 @@ def _batch_read_tags(table, digests):
     if table is None or not unique:
         return {}
     if hasattr(table, "read_many"):
-        return table.read_many(unique)
+        records = table.read_many(unique)
+        return {
+            digest: {
+                "tags": [tag for tag in record.get("tags", []) if isinstance(tag, str)],
+                "version": int(record.get("version", 0)),
+                "rotation": _rotation_value(record.get("rotation", 0)),
+            }
+            for digest, record in records.items()
+        }
 
     def read_one(digest):
         response = table.get_item(
             Key={"sha256": digest},
             ConsistentRead=True,
-            ProjectionExpression="#tags, #version",
-            ExpressionAttributeNames={"#tags": "tags", "#version": "version"},
+            ProjectionExpression="#tags, #version, #rotation",
+            ExpressionAttributeNames={
+                "#tags": "tags",
+                "#version": "version",
+                "#rotation": "rotation",
+            },
         )
         item = response.get("Item", {})
         return digest, {
             "tags": [tag for tag in item.get("tags", []) if isinstance(tag, str)],
             "version": int(item.get("version", 0)),
+            "rotation": _rotation_value(item.get("rotation", 0)),
         }
 
     with ThreadPoolExecutor(max_workers=min(16, len(unique))) as executor:
         return dict(executor.map(read_one, unique))
 
 
+def _rotation_value(value):
+    try:
+        angle = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return angle if angle in {0, 90, 180, 270} and angle == value else 0
+
+
 def update_tags_response(s3, table, bucket, prefix, payload):
-    """Validate, version-check, and save shared tags for a published file hash."""
+    """Validate, version-check, and save shared annotations for a published file hash."""
     if not isinstance(payload, dict):
         return _response(400, {"error": "Request body must be a JSON object"})
     digest = payload.get("sha256")
     expected_version = payload.get("expected_version")
     tags = payload.get("tags")
+    rotation = payload.get("rotation")
     if not isinstance(digest, str) or not SHA256_PATTERN.fullmatch(digest):
         return _response(400, {"error": "A valid file SHA-256 is required"})
     if type(expected_version) is not int or expected_version < 0:
         return _response(400, {"error": "A non-negative expected_version is required"})
-    if not isinstance(tags, list) or len(tags) > MAX_TAGS_PER_FILE:
+    if tags is None and rotation is None:
+        return _response(400, {"error": "Provide tags or a rotation"})
+    if tags is not None and (not isinstance(tags, list) or len(tags) > MAX_TAGS_PER_FILE):
         return _response(400, {"error": f"Provide at most {MAX_TAGS_PER_FILE} tags"})
+    if rotation is not None and (
+        type(rotation) is not int or rotation not in {0, 90, 180, 270}
+    ):
+        return _response(400, {"error": "Rotation must be 0, 90, 180, or 270 degrees"})
     normalized = []
     seen = set()
-    for tag in tags:
+    for tag in tags or []:
         if not isinstance(tag, str):
             return _response(400, {"error": "Tags must be text"})
         if any(ord(char) < 32 for char in tag):
@@ -404,6 +526,17 @@ def update_tags_response(s3, table, bucket, prefix, payload):
             normalized.append(value)
             seen.add(folded)
     normalized.sort(key=str.casefold)
+
+    current = _batch_read_tags(table, [digest]).get(
+        digest, {"tags": [], "version": 0, "rotation": 0}
+    )
+    if current.get("version", 0) != expected_version:
+        return _response(
+            409,
+            {"error": "These file annotations changed in another session. Reload and retry."},
+        )
+    next_tags = normalized if tags is not None else current.get("tags", [])
+    next_rotation = rotation if rotation is not None else current.get("rotation", 0)
 
     index_prefix = prefix.rstrip("/") + "/index/"
     latest = _latest_index(s3, bucket, index_prefix)
@@ -429,7 +562,8 @@ def update_tags_response(s3, table, bucket, prefix, payload):
 
     item = {
         "sha256": digest,
-        "tags": normalized,
+        "tags": next_tags,
+        "rotation": next_rotation,
         "version": expected_version + 1,
         "updated_at": datetime.now(UTC).isoformat(),
     }
@@ -450,10 +584,158 @@ def update_tags_response(s3, table, bucket, prefix, payload):
         error = getattr(exc, "response", {}).get("Error", {}).get("Code")
         if error == "ConditionalCheckFailedException":
             return _response(
-                409, {"error": "These tags changed in another session. Reload and retry."}
+                409,
+                {"error": "These file annotations changed in another session. Reload and retry."},
             )
         raise
-    return _response(200, {"sha256": digest, "tags": normalized, "version": expected_version + 1})
+    return _response(200, {
+        "sha256": digest,
+        "tags": next_tags,
+        "rotation": next_rotation,
+        "version": expected_version + 1,
+    })
+
+
+def update_visibility_response(s3, table, bucket, prefix, payload, actor):
+    """Hide or restore one archived entry, or all identical copies, in the library."""
+    if not isinstance(payload, dict):
+        return _response(400, {"error": "Request body must be a JSON object"})
+    digest = payload.get("sha256")
+    source_id = payload.get("source_id")
+    path = payload.get("path")
+    scope = payload.get("scope")
+    hidden = payload.get("hidden")
+    reason = payload.get("reason", "")
+    expected_version = payload.get("expected_version")
+    if not isinstance(digest, str) or not SHA256_PATTERN.fullmatch(digest):
+        return _response(400, {"error": "A valid file SHA-256 is required"})
+    if not isinstance(source_id, str) or not re.fullmatch(r"SRC-\d{4,}", source_id):
+        return _response(400, {"error": "A valid source ID is required"})
+    if (
+        not isinstance(path, str)
+        or not path
+        or len(path) > 1024
+        or path.startswith("/")
+        or "\\" in path
+        or any(part in {"", ".", ".."} for part in path.split("/"))
+    ):
+        return _response(400, {"error": "A safe relative file path is required"})
+    if scope not in {"entry", "content"}:
+        return _response(400, {"error": "Scope must be entry or content"})
+    if type(hidden) is not bool:
+        return _response(400, {"error": "Hidden must be true or false"})
+    if type(expected_version) is not int or expected_version < 0:
+        return _response(400, {"error": "A non-negative expected_version is required"})
+    if not isinstance(reason, str):
+        return _response(400, {"error": "Reason must be text"})
+    reason = reason.strip()
+    if len(reason) > MAX_VISIBILITY_REASON_LENGTH or any(ord(char) < 32 for char in reason):
+        return _response(
+            400,
+            {"error": f"Reason must be at most {MAX_VISIBILITY_REASON_LENGTH} characters"},
+        )
+
+    normalized_prefix = prefix.rstrip("/") + "/"
+    latest = _latest_index(s3, bucket, normalized_prefix + "index/")
+    if latest is None:
+        return _response(404, {"error": "The family library has not been published yet"})
+    body = s3.get_object(Bucket=bucket, Key=latest["Key"])["Body"].read()
+    expected_hash = latest["Key"].rsplit("/", 1)[-1].removesuffix(".json")
+    if (
+        not SHA256_PATTERN.fullmatch(expected_hash)
+        or hashlib.sha256(body).hexdigest() != expected_hash
+    ):
+        return _response(503, {"error": "The published library index failed its integrity check"})
+    try:
+        document = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return _response(503, {"error": "The published library index is invalid"})
+    if not isinstance(document, dict) or not isinstance(document.get("items"), list):
+        return _response(503, {"error": "The published library index is invalid"})
+    if not any(
+        isinstance(item, dict)
+        and item.get("sha256") == digest
+        and item.get("source_id") == source_id
+        and item.get("path") == path
+        for item in document["items"]
+    ):
+        return _response(404, {"error": "This file is not in the published library"})
+
+    key_item = {"source_id": source_id, "path": path, "sha256": digest}
+    visibility_key = _visibility_key(key_item, scope)
+    previous = table.get_item(
+        Key={"visibility_key": visibility_key},
+        ConsistentRead=True,
+    ).get("Item", {})
+    current_version = int(previous.get("version", 0))
+    if current_version != expected_version:
+        return _response(
+            409,
+            {"error": "This visibility setting changed in another session. Reload and retry."},
+        )
+    changed_at = datetime.now(UTC).isoformat()
+    history = previous.get("history", [])
+    if not isinstance(history, list):
+        history = []
+    history = (history + [{
+        "hidden": hidden,
+        "changed_at": changed_at,
+        "changed_by": actor,
+        "reason": reason,
+    }])[-25:]
+    item = {
+        "visibility_key": visibility_key,
+        "scope": scope,
+        "sha256": digest,
+        "source_id": source_id,
+        "path": path,
+        "hidden": hidden,
+        "version": expected_version + 1,
+        "updated_at": changed_at,
+        "updated_by": actor,
+        "reason": reason,
+        "history": history,
+    }
+    if hidden:
+        item["hidden_at"] = changed_at
+        item["hidden_by"] = actor
+    else:
+        if previous.get("hidden_at"):
+            item["hidden_at"] = previous["hidden_at"]
+        if previous.get("hidden_by"):
+            item["hidden_by"] = previous["hidden_by"]
+    parameters = {
+        "Item": item,
+        "ConditionExpression": (
+            "attribute_not_exists(#key)" if expected_version == 0 else "#version = :expected"
+        ),
+        "ExpressionAttributeNames": (
+            {"#key": "visibility_key"}
+            if expected_version == 0
+            else {"#version": "version"}
+        ),
+    }
+    if expected_version > 0:
+        parameters["ExpressionAttributeValues"] = {":expected": expected_version}
+    try:
+        table.put_item(**parameters)
+    except Exception as exc:
+        error = getattr(exc, "response", {}).get("Error", {}).get("Code")
+        if error == "ConditionalCheckFailedException":
+            return _response(
+                409,
+                {"error": "This visibility setting changed in another session. Reload and retry."},
+            )
+        raise
+    return _response(
+        200,
+        {
+            "visibility_key": visibility_key,
+            "scope": scope,
+            "hidden": hidden,
+            "version": expected_version + 1,
+        },
+    )
 
 
 def _sort_items(items, sort_order):

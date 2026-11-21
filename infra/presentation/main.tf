@@ -240,6 +240,22 @@ resource "aws_dynamodb_table" "library_tags" {
   }
 }
 
+resource "aws_dynamodb_table" "library_visibility" {
+  name                        = "${var.project_name}-library-visibility"
+  billing_mode                = "PAY_PER_REQUEST"
+  hash_key                    = "visibility_key"
+  deletion_protection_enabled = true
+
+  attribute {
+    name = "visibility_key"
+    type = "S"
+  }
+
+  point_in_time_recovery {
+    enabled = true
+  }
+}
+
 resource "aws_iam_role_policy" "api_library_read" {
   name = "read-derived-library-only"
   role = aws_iam_role.api.id
@@ -271,6 +287,12 @@ resource "aws_iam_role_policy" "api_library_read" {
         Effect   = "Allow"
         Action   = ["dynamodb:GetItem", "dynamodb:Scan", "dynamodb:PutItem"]
         Resource = aws_dynamodb_table.library_tags.arn
+      },
+      {
+        Sid      = "ManageLibraryVisibility"
+        Effect   = "Allow"
+        Action   = ["dynamodb:GetItem", "dynamodb:Scan", "dynamodb:PutItem"]
+        Resource = aws_dynamodb_table.library_visibility.arn
       }
     ]
   })
@@ -298,6 +320,7 @@ resource "aws_lambda_function" "api" {
       ARCHIVE_REGION    = var.archive_bucket_region
       LIBRARY_PREFIX    = local.library_key_prefix
       ANNOTATIONS_TABLE = aws_dynamodb_table.library_tags.name
+      VISIBILITY_TABLE  = aws_dynamodb_table.library_visibility.name
     }
   }
 }
@@ -361,6 +384,14 @@ resource "aws_apigatewayv2_route" "tags" {
   authorizer_id      = aws_apigatewayv2_authorizer.family.id
 }
 
+resource "aws_apigatewayv2_route" "visibility" {
+  api_id             = aws_apigatewayv2_api.library.id
+  route_key          = "PUT /api/visibility"
+  target             = "integrations/${aws_apigatewayv2_integration.api.id}"
+  authorization_type = "JWT"
+  authorizer_id      = aws_apigatewayv2_authorizer.family.id
+}
+
 resource "aws_apigatewayv2_stage" "default" {
   api_id      = aws_apigatewayv2_api.library.id
   name        = "$default"
@@ -389,4 +420,12 @@ resource "aws_lambda_permission" "api_gateway_tags" {
   function_name = aws_lambda_function.api.function_name
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_apigatewayv2_api.library.execution_arn}/*/PUT/api/tags"
+}
+
+resource "aws_lambda_permission" "api_gateway_visibility" {
+  statement_id  = "AllowAuthenticatedHttpApiVisibilityUpdates"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.api.function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_apigatewayv2_api.library.execution_arn}/*/PUT/api/visibility"
 }

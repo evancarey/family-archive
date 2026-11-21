@@ -35,6 +35,7 @@ export const fetchLibraryMedia = async ({
   limit = 30,
   mediaType = "photo",
   sort = "archive",
+  visibility = "visible",
 }) => {
   if (!["photo", "video"].includes(mediaType)) {
     throw new TypeError("The library media type must be photo or video.");
@@ -46,6 +47,7 @@ export const fetchLibraryMedia = async ({
     offset: String(offset),
     media: mediaType,
     sort,
+    visibility,
     q: query,
     source: sourceIds.join(","),
   });
@@ -69,20 +71,55 @@ export const fetchLibraryMedia = async ({
 export const fetchPhotos = (options) =>
   fetchLibraryMedia({ ...options, mediaType: "photo" });
 
-export const updateFileTags = async ({ sha256, tags, expectedVersion }) => {
+const updateFileAnnotation = async (body, failureMessage, path = "/api/tags") => {
   const token = await getValidAccessToken();
   if (!token) throw new SignInRequiredError();
   const config = getPresentationConfig();
-  const response = await fetch(endpoint(config.apiUrl, "/api/tags"), {
+  const response = await fetch(endpoint(config.apiUrl, path), {
     method: "PUT",
     headers: {
       authorization: `Bearer ${token}`,
       "content-type": "application/json",
     },
-    body: JSON.stringify({ sha256, tags, expected_version: expectedVersion }),
+    body: JSON.stringify(body),
     cache: "no-store",
   });
   const payload = await response.json();
-  if (!response.ok) throw new Error(payload.error || "Tags could not be saved.");
+  if (!response.ok) throw new Error(payload.error || failureMessage);
   return payload;
 };
+
+export const updateFileTags = ({ sha256, tags, expectedVersion }) =>
+  updateFileAnnotation(
+    { sha256, tags, expected_version: expectedVersion },
+    "Tags could not be saved.",
+  );
+
+export const updateFileRotation = ({ sha256, rotation, expectedVersion }) =>
+  updateFileAnnotation(
+    { sha256, rotation, expected_version: expectedVersion },
+    "Rotation could not be saved.",
+  );
+
+export const updateFileVisibility = ({
+  sha256,
+  sourceId,
+  path,
+  scope,
+  hidden,
+  reason = "",
+  expectedVersion,
+}) =>
+  updateFileAnnotation(
+    {
+      sha256,
+      source_id: sourceId,
+      path,
+      scope,
+      hidden,
+      reason,
+      expected_version: expectedVersion,
+    },
+    "File visibility could not be saved.",
+    "/api/visibility",
+  );

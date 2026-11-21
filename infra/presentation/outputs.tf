@@ -32,3 +32,8 @@ output "library_tags_table_name" {
   description = "DynamoDB table holding shared annotations for derived library files."
   value       = aws_dynamodb_table.library_tags.name
 }
+
+output "library_visibility_table_name" {
+  description = "DynamoDB table holding reversible visibility settings for library entries."
+  value       = aws_dynamodb_table.library_visibility.name
+}

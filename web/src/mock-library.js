@@ -57,6 +57,9 @@ export const readMockLibraryPage = ({
   sourceIds = sourceId ? [sourceId] : [],
   mediaType = "photo",
   sort = "archive",
+  visibility = "visible",
+  hiddenEntries = {},
+  hiddenHashes = {},
   offset = 0,
   limit = 30,
 }) => {
@@ -64,6 +67,11 @@ export const readMockLibraryPage = ({
   const filtered = MOCK_ITEMS.filter((item) => {
     if ((item.media_type || "photo") !== mediaType) return false;
     if (sourceIds.length && !sourceIds.includes(item.source_id)) return false;
+    const hiddenScopes = [
+      ...(hiddenEntries[`${item.source_id}:${item.path}:${item.sha256}`] ? ["entry"] : []),
+      ...(hiddenHashes[item.sha256] ? ["content"] : []),
+    ];
+    if ((visibility === "hidden") !== Boolean(hiddenScopes.length)) return false;
     if (!normalizedQuery) return true;
     return `${item.filename} ${item.path} ${item.volume_label} ${item.source_id}`
       .toLocaleLowerCase()
@@ -71,9 +79,16 @@ export const readMockLibraryPage = ({
   });
   if (sort === "newest") filtered.sort((a, b) => b.mtime_ns - a.mtime_ns);
   if (sort === "oldest") filtered.sort((a, b) => a.mtime_ns - b.mtime_ns);
+  const withVisibility = filtered.map((item) => ({
+    ...item,
+    hidden_scopes: [
+      ...(hiddenEntries[`${item.source_id}:${item.path}:${item.sha256}`] ? ["entry"] : []),
+      ...(hiddenHashes[item.sha256] ? ["content"] : []),
+    ],
+  }));
   return {
     sources: SOURCES,
-    total: filtered.length,
-    items: filtered.slice(offset, offset + limit),
+    total: withVisibility.length,
+    items: withVisibility.slice(offset, offset + limit),
   };
 };

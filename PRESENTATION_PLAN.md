@@ -104,8 +104,12 @@ with authorization code and PKCE, stores its token session in tab-scoped
 through Cognito. The responsive page provides a
 searchable, paginated photo grid backed by authenticated `GET /api/library`.
 The client also offers a list layout, adjustable page sizes from 10 to 100,
-and preview-only thumbnail rotation controls whose settings persist in that
-browser.
+and thumbnail rotation controls whose settings are shared across users by the
+file's SHA-256 hash. Rotation changes affect previews only and leave archive
+masters unchanged. Signed-in users can hide a single source/path copy or every
+copy with the same SHA-256 from the derived library, then restore hidden items
+from a separate view. Visibility settings are shared and stored separately from
+the immutable archive and published index.
 The API reads the newest content-addressed index and returns short-lived links
 to the selected page's private media. The static client is deployed at
 https://d1nbk1tlbv97a1.cloudfront.net/. The derived library is published, and
