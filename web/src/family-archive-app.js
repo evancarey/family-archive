@@ -912,19 +912,6 @@ class FamilyArchiveApp extends LitElement {
             `
           : ""}
 
-        ${this.showStatus && !this.viewerOpen
-          ? html`
-              <section class="account-panel" aria-live="polite">
-                <div class="account-copy">
-                  <p class="eyebrow">${signedIn ? "Your library" : this.mockMode ? "Local mock" : "Preview"}</p>
-                  <h2>${this.statusTitle}</h2>
-                  <p>${this.statusMessage}</p>
-                </div>
-                <div class="status-indicator" data-state=${this.statusState} aria-hidden="true"></div>
-              </section>
-            `
-          : ""}
-
         ${libraryVisible
           ? html`
               <section class="library-view" aria-labelledby="library-title" ?hidden=${this.viewerOpen}>
